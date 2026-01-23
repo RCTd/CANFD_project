@@ -9,6 +9,7 @@
  * Definitions
  ******************************************************************************/
 
+#define SENDER1 1U
 #define LISTENTIMEMS 10
 #define WAITTIMEMS 2
 #define SENDTIMEMS LISTENTIMEMS
@@ -32,13 +33,26 @@
 #define BOARD_LED_GPIO                BOARD_LED_RED_GPIO
 #define BOARD_LED_GPIO_PIN            BOARD_LED_RED_GPIO_PIN
 /* IDs for the messages */
-#define TX_MSG_ID_BUTTON3             0x123UL
-#define TX_MSG_ID_BUTTON2             0x124UL
-#define TX_MSG_ID_TIMER               0x321UL
+#define TX_MSG_ID_RECEIVER2           0x322UL
+#define TX_MSG_ID_RECEIVER1           0x321UL
+
+/* DHT22 State Machine */
+typedef enum {
+    DHT_IDLE,
+    DHT_START_18MS,
+    DHT_WAIT_RESPONSE,
+    DHT_READING
+} dht_state_t;
 
 
-#define DHT_PORT GPIO1
-#define DHT_PIN 6U
+/* Adjust these macros if your DHT is on a different pin */
+/* Example assumes P0_22, change to match your board.h/schematic */
+#define DHT_GPIO GPIO1
+#define DHT_PIN  6U
+#define DHT_IRQn        GPIO10_IRQn
+#define DHT_IRQ_HANDLER GPIO10_IRQHandler
+//#define DHT_PORT GPIO1
+//#define DHT_PIN 6U
 
 /* --- CTimer Definitions --- */
 #define CTIMER                        CTIMER4

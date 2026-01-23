@@ -51,6 +51,12 @@ volatile bool g_timerExpired = false;
 volatile bool g_rxReceived = false;
 volatile bool g_triggerSensorRead = false; /* Flag to trigger read from Main */
 
+
+volatile dht_state_t g_dhtState = DHT_IDLE;
+volatile uint32_t g_dhtBits[5];      /* Buffer for 40 bits (5 bytes) */
+volatile uint8_t  g_dhtBitIdx = 0;   /* Current bit index (0-39) */
+volatile uint32_t g_lastEdgeTime = 0;/* Timestamp of previous edge */
+
 /* FIFO Variables */
 volatile can_msg_t fifo_buffer[FIFO_SIZE];
 volatile uint8_t fifo_head = 0;
@@ -67,6 +73,9 @@ volatile bool txComplete = true;
 volatile bool txError = false;
 
 static ctimer_match_config_t matchConfig0; /* For State Machine Timeout */
+
+/* Forward declaration */
+void Start_DHT_Read(void);
 
 /*******************************************************************************
  * FIFO Helper Functions
@@ -129,93 +138,156 @@ void BOARD_SW3_IRQ_HANDLER(void)
     if ((interruptFlags & (1U << BOARD_SW3_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW3_GPIO, 1U << BOARD_SW3_GPIO_PIN);
-        FIFO_Push(TX_MSG_ID_TIMER, 0x33);
+        FIFO_Push(TX_MSG_ID_RECEIVER2, 0x33);
     }
 
     if ((interruptFlags & (1U << BOARD_SW2_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW2_GPIO, 1U << BOARD_SW2_GPIO_PIN);
-        FIFO_Push(TX_MSG_ID_TIMER, 0x22);
+        Start_DHT_Read();
     }
     SDK_ISR_EXIT_BARRIER;
 }
 
 /* SCTimer Interrupt Handler for 2s Event */
+//void SCT0_IRQHandler(void)
+//{
+//    /* Clear the Match Event Flag */
+//    SCTIMER_ClearStatusFlags(SCT0, kSCTIMER_Event0Flag);
+//
+//    /* We set a flag here instead of reading the sensor.
+//       Reading DHT22 takes ~20ms and blocks. Doing that in ISR is dangerous. */
+//    g_triggerSensorRead = true;
+//
+//    SDK_ISR_EXIT_BARRIER;
+//}
+
 void SCT0_IRQHandler(void)
 {
-    /* Clear the Match Event Flag */
-    SCTIMER_ClearStatusFlags(SCT0, kSCTIMER_Event0Flag);
+    uint32_t status = SCT0->EVFLAG;
+    SCT0->EVFLAG = status; /* Clear flags */
 
-    /* We set a flag here instead of reading the sensor.
-       Reading DHT22 takes ~20ms and blocks. Doing that in ISR is dangerous. */
-    g_triggerSensorRead = true;
+    if (g_dhtState == DHT_START_18MS)
+    {
+        /* 18ms Low is done. Switch to Input/Listening Mode. */
+
+        /* Stop forcing Low, let Pull-up take it High */
+        GPIO_PinWrite(DHT_GPIO, DHT_PIN, 1U);
+
+        /* Configure as Input */
+        gpio_pin_config_t in_config = {kGPIO_DigitalInput, 0};
+        GPIO_PinInit(DHT_GPIO, DHT_PIN, &in_config);
+
+        /* FIXED: Use SetPinInterruptConfig instead of PortEnableInterrupts */
+        GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, kGPIO_InterruptEitherEdge);
+
+        /* Enable IRQ in NVIC (Usually enabled in Init, but ensures it's on) */
+        EnableIRQ(DHT_IRQn);
+
+        /* Reset Timer to 0 and let it run free for timestamping */
+        SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
+        SCT0->COUNT = 0;
+
+        /* FIXED: Use EV[0] instead of EVENT[0] */
+        SCT0->EV[0].STATE = 0;
+
+        SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
+
+        g_dhtState = DHT_WAIT_RESPONSE;
+    }
 
     SDK_ISR_EXIT_BARRIER;
 }
 
-bool read_dht22(float *humidity, float *temperature) {
-    uint8_t data[5] = {0};
+void DHT_IRQ_HANDLER(void)
+{
+    /* FIX 1: Use GPIO_GpioGetInterruptFlags */
+    if (GPIO_GpioGetInterruptFlags(DHT_GPIO) & (1U << DHT_PIN))
+    {
+        /* Clear Interrupt Flag */
+        GPIO_GpioClearInterruptFlags(DHT_GPIO, 1U << DHT_PIN);
 
-    // 1. Start Signal: Pull low for 18ms
-    gpio_pin_config_t gpio_out_config = {kGPIO_DigitalOutput, 1};
-    GPIO_PinInit(DHT_PORT, DHT_PIN, &gpio_out_config);
-    GPIO_PinWrite(DHT_PORT, DHT_PIN, 0U);
-    SDK_DelayAtLeastUs(18000, SystemCoreClock); // 18ms
+        /* Read current timestamp (in us) */
+        uint32_t now = SCT0->COUNT;
+        uint32_t width = now - g_lastEdgeTime;
+        g_lastEdgeTime = now;
 
-    // Pull high and switch to input
-    GPIO_PinWrite(DHT_PORT, DHT_PIN, 1U);
-    SDK_DelayAtLeastUs(40, SystemCoreClock);
-    gpio_pin_config_t gpio_in_config = {kGPIO_DigitalInput, 0};
-    GPIO_PinInit(DHT_PORT, DHT_PIN, &gpio_in_config);
+        /* Current Pin State */
+        uint32_t pinState = GPIO_PinRead(DHT_GPIO, DHT_PIN);
 
-    // 2. Critical Section: Disable interrupts for precise timing
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
+        switch (g_dhtState)
+        {
+            case DHT_WAIT_RESPONSE:
+                if (width > 60 && width < 100 && pinState == 0) {
+                    g_dhtState = DHT_READING;
+                    g_dhtBitIdx = 0;
+                }
+                break;
 
-    // Wait for sensor response (80us Low, 80us High)
-    uint32_t timeout = 20000;
-    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout); // Wait for our pull-up to end
-    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 0 && --timeout); // Sensor ACK Low
-    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout); // Sensor ACK High
+            case DHT_READING:
+                if (pinState == 0)
+                {
+                    if (width > 40)
+                    {
+                        g_dhtBits[g_dhtBitIdx / 8] |= (1 << (7 - (g_dhtBitIdx % 8)));
+                    }
+                    g_dhtBitIdx++;
 
-    if(timeout == 0) {
-        __set_PRIMASK(primask); // Restore interrupts
-        return false;
-    }
+                    if (g_dhtBitIdx >= 40)
+                    {
+                        /* FIX 2: Pass 0 to disable the interrupt config */
+                        GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, (gpio_interrupt_config_t)0);
 
-    // 3. Read 40 bits
-    for (int i = 0; i < 40; i++) {
-        // Wait for the 50us LOW preamble to finish
-        while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 0);
+                        g_dhtState = DHT_IDLE;
 
-        // Wait 40us (Threshold between '0' [28us] and '1' [70us])
-        SDK_DelayAtLeastUs(40, SystemCoreClock);
+                        uint8_t sum = g_dhtBits[0] + g_dhtBits[1] + g_dhtBits[2] + g_dhtBits[3];
+                        if (g_dhtBits[4] == sum)
+                        {
+                            g_triggerSensorRead = true;
+                        }
+                        else
+                        {
+                            LOG_INFO("DHT Checksum Error\r\n");
+                        }
+                    }
+                }
+                break;
 
-        if(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1) {
-            data[i/8] |= (1 << (7 - (i % 8)));
-            timeout = 10000;
-            while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout);
+            default: break;
         }
     }
+    SDK_ISR_EXIT_BARRIER;
+}
 
-    __set_PRIMASK(primask); // Re-enable interrupts
+void Start_DHT_Read(void)
+{
+    if (g_dhtState != DHT_IDLE) return; /* Busy */
 
-    // 4. Calculate Values
-    if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
-        float h_val = (float)((data[0] << 8) + data[1]) / 10.0f;
-        float t_val = (float)((data[2] << 8) + data[3]) / 10.0f;
+    LOG_INFO("Starting DHT22 Read (Async)...\r\n");
 
-        // Simple formatting for CAN byte (casting to int for simplicity in this example)
-        int32_t h_int = (int32_t)h_val;
-        int32_t t_int = (int32_t)t_val;
+    /* 1. Reset State Variables */
+    g_dhtState = DHT_START_18MS;
+    g_dhtBitIdx = 0;
+    memset((void*)g_dhtBits, 0, sizeof(g_dhtBits));
 
-        LOG_INFO("Humidity: %d %% | Temp: %d C\r\n", h_int, t_int);
-        *humidity = h_val;
-        *temperature = t_val;
-        return true;
-    }
+    /* 2. Pull Pin LOW for 18ms Start Signal */
+    gpio_pin_config_t out_config = {kGPIO_DigitalOutput, 0};
+    GPIO_PinInit(DHT_GPIO, DHT_PIN, &out_config);
+    GPIO_PinWrite(DHT_GPIO, DHT_PIN, 0U);
 
-    return false;
+    /* 3. Setup SCTimer for 18ms Timeout (One-Shot) */
+    SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
+    SCTIMER_Init(SCT0, &(sctimer_config_t){
+        .enableCounterUnify = true,
+        .clockMode = kSCTIMER_System_ClockMode,
+        .prescale_l = (SystemCoreClock / 1000000U) - 1U /* FIXED: prescale_l (lowercase) */
+    });
+
+    /* Create Match Event for 18ms (18000us) */
+    uint32_t eventId;
+    SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, 18000U, 0, kSCTIMER_Counter_U, &eventId);
+    SCTIMER_EnableInterrupts(SCT0, 1 << eventId);
+    SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
 }
 
 /* Callback for CTIMER Match 0 - State Machine Timeout */
@@ -253,8 +325,10 @@ static status_t SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
     txFrame.type   = (uint8_t)kFLEXCAN_FrameTypeData;
     txFrame.edl    = 1U;
     txFrame.brs    = 1U;
-    txFrame.length = 1U;
-    txFrame.dataWord[0] = CAN_WORD_DATA_BYTE_0(dataByte);
+//    txFrame.length = 1U;
+    txFrame.length = 2U;
+//    txFrame.dataWord[0] = CAN_WORD_DATA_BYTE_0(dataByte);
+    txFrame.dataWord[0] = (uint32_t)dataByte | (SENDER1 << 8);
 
     txXfer.mbIdx = TX_MESSAGE_BUFFER_NUM;
     txXfer.framefd = &txFrame;
@@ -424,23 +498,36 @@ int main(void)
 
     while (1)
     {
-        /* Check if SCTimer triggered a sensor read */
-        if (g_triggerSensorRead)
-        {
-            g_triggerSensorRead = false;
+//        /* Check if SCTimer triggered a sensor read */
+//        if (g_triggerSensorRead)
+//        {
+//            g_triggerSensorRead = false;
+//
+//            float humidity = 0.0f;
+//            float temperature = 0.0f;
+//
+//            if (read_dht22(&humidity, &temperature)) {
+//                LOG_INFO("Reading done \r\n");
+//            } else {
+//                LOG_INFO("Sensor Read Failed\r\n");
+//            }
+//            /* Push data as integers to CAN FIFO */
+//            FIFO_Push(TX_MSG_ID_RECEIVER1, (uint8_t)humidity);
+//            FIFO_Push(TX_MSG_ID_RECEIVER2, (uint8_t)temperature);
+//        }
+    	if (g_triggerSensorRead)
+    	{
+    	    g_triggerSensorRead = false;
 
-            float humidity = 0.0f;
-            float temperature = 0.0f;
+    	    /* Convert Global Buffer to Values */
+    	    float h_val = (float)((g_dhtBits[0] << 8) + g_dhtBits[1]) / 10.0f;
+    	    float t_val = (float)((g_dhtBits[2] << 8) + g_dhtBits[3]) / 10.0f;
 
-            if (read_dht22(&humidity, &temperature)) {
-                LOG_INFO("Reading done \r\n");
-            } else {
-                LOG_INFO("Sensor Read Failed\r\n");
-            }
-            /* Push data as integers to CAN FIFO */
-            FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)humidity);
-            FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)temperature);
-        }
+    	    LOG_INFO("DHT Async Read: H=%.1f T=%.1f\r\n", h_val, t_val);
+
+    	    FIFO_Push(TX_MSG_ID_RECEIVER1, (uint8_t)h_val);
+    	    FIFO_Push(TX_MSG_ID_RECEIVER2, (uint8_t)t_val);
+    	}
 
         /***********************************************************************
          * STATE: LISTEN
