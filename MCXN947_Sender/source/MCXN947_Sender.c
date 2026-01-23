@@ -13,9 +13,17 @@
 #include "app.h"
 
 /*******************************************************************************
- * Definitions & FIFO Settings
+ * Definitions & Settings
  ******************************************************************************/
-#define FIFO_SIZE 16 /* Must be power of 2 */
+#define FIFO_SIZE 16
+/* RX_MESSAGE_BUFFER_NUM is defined in app.h */
+
+typedef enum
+{
+    STATE_LISTEN,
+    STATE_SEND,
+    STATE_WAIT
+} app_state_t;
 
 typedef struct
 {
@@ -27,6 +35,11 @@ typedef struct
  * Variables
  ******************************************************************************/
 
+/* State Variables */
+volatile app_state_t g_currentState = STATE_LISTEN;
+volatile bool g_timerExpired = false;
+volatile bool g_rxReceived = false;
+
 /* FIFO Variables */
 volatile can_msg_t fifo_buffer[FIFO_SIZE];
 volatile uint8_t fifo_head = 0;
@@ -35,7 +48,10 @@ volatile uint8_t fifo_tail = 0;
 /* FlexCAN Handle and Variables */
 flexcan_handle_t flexcanHandle;
 flexcan_fd_frame_t txFrame;
+flexcan_fd_frame_t rxFrame;
 flexcan_mb_transfer_t txXfer;
+flexcan_mb_transfer_t rxXfer;
+
 volatile bool txComplete = true;
 volatile bool txError = false;
 
@@ -47,11 +63,7 @@ static ctimer_match_config_t matchConfig0;
 bool FIFO_Push(uint32_t id, uint8_t data)
 {
     uint8_t next_head = (fifo_head + 1) % FIFO_SIZE;
-
-    if (next_head == fifo_tail)
-    {
-        return false; /* Buffer Full */
-    }
+    if (next_head == fifo_tail) return false;
 
     fifo_buffer[fifo_head].id = id;
     fifo_buffer[fifo_head].dataByte = data;
@@ -61,10 +73,7 @@ bool FIFO_Push(uint32_t id, uint8_t data)
 
 bool FIFO_Pop(can_msg_t *msg)
 {
-    if (fifo_head == fifo_tail)
-    {
-        return false; /* Buffer Empty */
-    }
+    if (fifo_head == fifo_tail) return false;
 
     *msg = fifo_buffer[fifo_tail];
     fifo_tail = (fifo_tail + 1) % FIFO_SIZE;
@@ -85,6 +94,15 @@ static void flexcan_callback(CAN_Type *base, flexcan_handle_t *handle, status_t 
     {
         txComplete = true;
     }
+    else if (status == kStatus_FLEXCAN_RxIdle)
+    {
+        /* Because disableSelfReception is TRUE, this only triggers for external messages */
+        g_rxReceived = true;
+
+        rxXfer.mbIdx = RX_MESSAGE_BUFFER_NUM;
+        rxXfer.framefd = &rxFrame;
+        FLEXCAN_TransferFDReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rxXfer);
+    }
     else if (status == kStatus_FLEXCAN_ErrorStatus)
     {
         txError = true;
@@ -103,11 +121,6 @@ void BOARD_SW3_IRQ_HANDLER(void)
     if ((interruptFlags & (1U << BOARD_SW3_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW3_GPIO, 1U << BOARD_SW3_GPIO_PIN);
-
-        CTIMER_StopTimer(CTIMER);
-        CTIMER_Reset(CTIMER);
-        CTIMER_StartTimer(CTIMER);
-
         FIFO_Push(TX_MSG_ID_TIMER, 0x33);
     }
 
@@ -123,7 +136,7 @@ void BOARD_SW3_IRQ_HANDLER(void)
 void ctimer_match0_callback(uint32_t flags)
 {
     CTIMER_StopTimer(CTIMER);
-    FIFO_Push(TX_MSG_ID_TIMER, 0xBB);
+    g_timerExpired = true;
 }
 
 ctimer_callback_t ctimer_callback_table[] = {
@@ -133,6 +146,18 @@ ctimer_callback_t ctimer_callback_table[] = {
 /*******************************************************************************
  * Helper Functions
  ******************************************************************************/
+
+static void Restart_Timer_ms(uint32_t ms)
+{
+    CTIMER_StopTimer(CTIMER);
+    CTIMER_Reset(CTIMER);
+    g_timerExpired = false;
+
+    uint32_t matchVal = (CTIMER_CLK_FREQ / 1000U) * ms;
+    matchConfig0.matchValue = matchVal;
+    CTIMER_SetupMatch(CTIMER, CTIMER_MAT0_OUT, &matchConfig0);
+    CTIMER_StartTimer(CTIMER);
+}
 
 static void SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
 {
@@ -148,36 +173,27 @@ static void SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
     txXfer.framefd = &txFrame;
 
     txComplete = false;
-    txError = false;
 
-    LOG_INFO("Sending ID: 0x%X Data: 0x%02X \r\n", id, dataByte);
+    LOG_INFO(">> Sending MSG (ID: 0x%X)...\r\n", id);
 
     status_t status = FLEXCAN_TransferFDSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &txXfer);
-
-    if (status != kStatus_Success)
-    {
-        LOG_INFO("Fail to queue (Stat: %d).\r\n", status);
-        txComplete = true;
-    }
+    if (status != kStatus_Success) txComplete = true;
 }
 
 static void FLEXCAN_PHY_Config_Safe(void)
 {
     FLEXCAN_SetFDTxMbConfig(EXAMPLE_CAN, TX_MESSAGE_BUFFER_NUM, true);
 
-    /* Wake Transceiver */
     gpio_pin_config_t stb_config = {kGPIO_DigitalOutput, 1};
     GPIO_PinInit(EXAMPLE_STB_RGPIO, EXAMPLE_STB_RGPIO_PIN, &stb_config);
     GPIO_PortSet(EXAMPLE_STB_RGPIO, 1u << EXAMPLE_STB_RGPIO_PIN);
 
-    /* Prepare Handshake Frame */
     txFrame.id = FLEXCAN_ID_STD(0x555);
     txFrame.format = (uint8_t)kFLEXCAN_FrameFormatStandard;
     txFrame.type = (uint8_t)kFLEXCAN_FrameTypeData;
     txFrame.length = 0U;
     txFrame.edl = 0U;
     txFrame.brs = 0U;
-
     txXfer.mbIdx = TX_MESSAGE_BUFFER_NUM;
     txXfer.framefd = &txFrame;
 
@@ -185,21 +201,9 @@ static void FLEXCAN_PHY_Config_Safe(void)
     FLEXCAN_TransferFDSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &txXfer);
 
     volatile uint32_t timeout = 1000000;
-    while (!txComplete && timeout > 0)
-    {
-        timeout--;
-    }
+    while (!txComplete && timeout > 0) timeout--;
 
-    if (timeout == 0)
-    {
-        LOG_INFO("PHY Config Timeout (No Bus ACK). Aborting...\r\n");
-        FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
-        txComplete = true;
-    }
-    else
-    {
-        LOG_INFO("PHY Config ACK Received.\r\n");
-    }
+    if (timeout == 0) FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
 
     GPIO_PortClear(EXAMPLE_STB_RGPIO, 1u << EXAMPLE_STB_RGPIO_PIN);
 }
@@ -213,19 +217,19 @@ static void Init_Peripherals(void)
     ctimer_config_t ctimerConfig;
     gpio_pin_config_t sw_config = { kGPIO_DigitalInput, 0 };
     flexcan_timing_config_t timing_config;
+    flexcan_rx_mb_config_t mbConfig;
 
-    /* 1. Board Init */
     BOARD_InitHardware();
-    LOG_INFO("--- No-Hang CAN FD Sender (FIFO Enabled) ---\r\n");
+    LOG_INFO("--- CAN State Machine (Self-Reception Disabled) ---\r\n");
 
-    /* 2. GPIO Init */
+    /* GPIO */
     GPIO_SetPinInterruptConfig(BOARD_SW3_GPIO, BOARD_SW3_GPIO_PIN, kGPIO_InterruptFallingEdge);
     GPIO_PinInit(BOARD_SW3_GPIO, BOARD_SW3_GPIO_PIN, &sw_config);
     GPIO_SetPinInterruptConfig(BOARD_SW2_GPIO, BOARD_SW2_GPIO_PIN, kGPIO_InterruptFallingEdge);
     GPIO_PinInit(BOARD_SW2_GPIO, BOARD_SW2_GPIO_PIN, &sw_config);
     EnableIRQ(BOARD_SW3_IRQ);
 
-    /* 3. CTimer Init */
+    /* CTimer */
     CTIMER_GetDefaultConfig(&ctimerConfig);
     CTIMER_Init(CTIMER, &ctimerConfig);
 
@@ -235,13 +239,15 @@ static void Init_Peripherals(void)
     matchConfig0.outControl = kCTIMER_Output_NoAction;
     matchConfig0.outPinInitState = false;
     matchConfig0.enableInterrupt = true;
-
     CTIMER_RegisterCallBack(CTIMER, &ctimer_callback_table[0], kCTIMER_MultipleCallback);
-    CTIMER_SetupMatch(CTIMER, CTIMER_MAT0_OUT, &matchConfig0);
     EnableIRQ(CTIMER_IRQ_ID);
 
-    /* 4. FlexCAN Init */
+    /* FlexCAN */
     FLEXCAN_GetDefaultConfig(&flexcanConfig);
+
+    /* [CRITICAL] Disable Self Reception (Hardware Loopback Prevention) */
+    flexcanConfig.disableSelfReception = true;
+
     flexcanConfig.bitRateFD = 2000000U;
 #if defined(EXAMPLE_CAN_CLK_SOURCE)
     flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
@@ -256,15 +262,25 @@ static void Init_Peripherals(void)
 
     FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
     FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
-
-    /* 5. FlexCAN PHY & MB Setup */
     FLEXCAN_PHY_Config_Safe();
+
+    /* Setup TX Message Buffer */
     FLEXCAN_SetFDTxMbConfig(EXAMPLE_CAN, TX_MESSAGE_BUFFER_NUM, true);
 
-    /* Ensure txComplete starts true for the main loop */
-    txComplete = true;
+    /* Setup RX Message Buffer Configuration */
+    mbConfig.format = kFLEXCAN_FrameFormatStandard;
+    mbConfig.type   = kFLEXCAN_FrameTypeData;
+    mbConfig.id     = FLEXCAN_ID_STD(0);
 
-    LOG_INFO("Initialization Complete. Waiting for events...\r\n");
+    FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
+    FLEXCAN_SetRxMbGlobalMask(EXAMPLE_CAN, FLEXCAN_RX_MB_STD_MASK(0, 0, 0));
+
+    /* Start receiving */
+    rxXfer.mbIdx = RX_MESSAGE_BUFFER_NUM;
+    rxXfer.framefd = &rxFrame;
+    FLEXCAN_TransferFDReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rxXfer);
+
+    txComplete = true;
 }
 
 /*******************************************************************************
@@ -272,29 +288,104 @@ static void Init_Peripherals(void)
  ******************************************************************************/
 int main(void)
 {
-    /* Call the consolidated Init function */
     Init_Peripherals();
-
     can_msg_t nextMsg;
+
+    /* Start Initial State */
+    g_currentState = STATE_LISTEN;
+    LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+    Restart_Timer_ms(1000);
+    g_rxReceived = false;
 
     while (1)
     {
-        /* CRITICAL SECTION: Check FIFO logic atomically */
-        __disable_irq();
-        bool hasData = !FIFO_IsEmpty();
-        __enable_irq();
-
-        /* If we have data AND the previous transfer is done */
-        if (hasData && txComplete)
+        /***********************************************************************
+         * STATE: LISTEN
+         **********************************************************************/
+        if (g_currentState == STATE_LISTEN)
         {
-            /* Pop the message safely */
+            if (g_rxReceived)
+            {
+                LOG_INFO("Event: CAN Msg Received (Listen)\r\n");
+                g_rxReceived = false;
+
+                g_currentState = STATE_WAIT;
+                LOG_INFO("[STATE] -> WAIT (500ms)\r\n");
+                Restart_Timer_ms(500);
+            }
+            else if (g_timerExpired)
+            {
+                LOG_INFO("Event: Timer Expired (Listen)\r\n");
+
+                g_currentState = STATE_SEND;
+                LOG_INFO("[STATE] -> SEND (1000ms)\r\n");
+                Restart_Timer_ms(1000);
+            }
+        }
+
+        /***********************************************************************
+         * STATE: SEND
+         **********************************************************************/
+        else if (g_currentState == STATE_SEND)
+        {
+            bool fifoHasData;
+
             __disable_irq();
-            bool success = FIFO_Pop(&nextMsg);
+            fifoHasData = !FIFO_IsEmpty();
             __enable_irq();
 
-            if (success)
+            if (g_rxReceived)
             {
-                SendCanMessageNonBlocking(nextMsg.id, nextMsg.dataByte);
+                LOG_INFO("Event: CAN Msg Received (Send)\r\n");
+                g_rxReceived = false;
+
+                g_currentState = STATE_WAIT;
+                LOG_INFO("[STATE] -> WAIT (500ms)\r\n");
+                Restart_Timer_ms(500);
+            }
+            else if (fifoHasData && txComplete)
+            {
+                __disable_irq();
+                bool popped = FIFO_Pop(&nextMsg);
+                __enable_irq();
+
+                if (popped)
+                {
+                    SendCanMessageNonBlocking(nextMsg.id, nextMsg.dataByte);
+
+                    g_currentState = STATE_LISTEN;
+                    LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+                    Restart_Timer_ms(1000);
+                }
+            }
+            else if (g_timerExpired)
+            {
+                LOG_INFO("Event: Timer Expired (Send)\r\n");
+
+                g_currentState = STATE_LISTEN;
+                LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+                Restart_Timer_ms(1000);
+            }
+        }
+
+        /***********************************************************************
+         * STATE: WAIT
+         **********************************************************************/
+        else if (g_currentState == STATE_WAIT)
+        {
+            if (g_rxReceived)
+            {
+                LOG_INFO("Event: CAN Msg Received (Wait) -> Resetting Wait\r\n");
+                g_rxReceived = false;
+                Restart_Timer_ms(500);
+            }
+            else if (g_timerExpired)
+            {
+                LOG_INFO("Event: Wait Finished\r\n");
+
+                g_currentState = STATE_SEND;
+                LOG_INFO("[STATE] -> SEND (1000ms)\r\n");
+                Restart_Timer_ms(1000);
             }
         }
     }
