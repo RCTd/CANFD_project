@@ -94,6 +94,49 @@ static void FLEXCAN_PHY_Config_Safe(void)
     GPIO_PortClear(EXAMPLE_STB_RGPIO, 1u << EXAMPLE_STB_RGPIO_PIN);
 }
 
+static void Init_Peripherals(void){
+	flexcan_config_t flexcanConfig;
+	flexcan_rx_mb_config_t mbConfig;
+	gpio_pin_config_t led_config = {kGPIO_DigitalOutput, 1};
+
+	BOARD_InitHardware();
+	LOG_INFO("--- No-Hang CAN FD Receiver ---\r\n");
+
+	GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
+
+	FLEXCAN_GetDefaultConfig(&flexcanConfig);
+//    flexcanConfig.bitRate = 500000U;
+	flexcanConfig.bitRateFD = 2000000U;
+
+#if defined(EXAMPLE_CAN_CLK_SOURCE)
+	flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
+#endif
+
+	flexcan_timing_config_t timing_config;
+	memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
+	if (FLEXCAN_FDCalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.bitRate, flexcanConfig.bitRateFD,
+												EXAMPLE_CAN_CLK_FREQ, &timing_config))
+	{
+		memcpy(&(flexcanConfig.timingConfig), &timing_config, sizeof(flexcan_timing_config_t));
+	}
+
+	FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
+
+	/* Create Handle for Interrupt Support */
+	FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
+
+	/* Safe PHY Config */
+	FLEXCAN_PHY_Config_Safe();
+
+	/* Setup Receive Message Buffer (MB9) */
+	mbConfig.format = kFLEXCAN_FrameFormatStandard;
+	mbConfig.type   = kFLEXCAN_FrameTypeData;
+	mbConfig.id     = FLEXCAN_ID_STD(RX_MSG_ID);
+
+	FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
+	FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x7FF, 0, 0));
+}
+
 /* Function now handles incrementing the state AND setting GPIOs */
 static void SetNextTrafficLight(traffic_state_t *currentState)
 {
@@ -128,46 +171,7 @@ static void SetNextTrafficLight(traffic_state_t *currentState)
 int main(void)
 {
 	traffic_state_t state = STATE_OFF;
-    flexcan_config_t flexcanConfig;
-    flexcan_rx_mb_config_t mbConfig;
-    gpio_pin_config_t led_config = {kGPIO_DigitalOutput, 1};
-
-    BOARD_InitHardware();
-    LOG_INFO("--- No-Hang CAN FD Receiver ---\r\n");
-
-    GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
-
-    FLEXCAN_GetDefaultConfig(&flexcanConfig);
-//    flexcanConfig.bitRate = 500000U;
-    flexcanConfig.bitRateFD = 2000000U;
-
-#if defined(EXAMPLE_CAN_CLK_SOURCE)
-    flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
-#endif
-
-    flexcan_timing_config_t timing_config;
-    memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
-    if (FLEXCAN_FDCalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.bitRate, flexcanConfig.bitRateFD,
-                                                EXAMPLE_CAN_CLK_FREQ, &timing_config))
-    {
-        memcpy(&(flexcanConfig.timingConfig), &timing_config, sizeof(flexcan_timing_config_t));
-    }
-
-    FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
-
-    /* Create Handle for Interrupt Support */
-    FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
-
-    /* Safe PHY Config */
-    FLEXCAN_PHY_Config_Safe();
-
-    /* Setup Receive Message Buffer (MB9) */
-    mbConfig.format = kFLEXCAN_FrameFormatStandard;
-    mbConfig.type   = kFLEXCAN_FrameTypeData;
-    mbConfig.id     = FLEXCAN_ID_STD(RX_MSG_ID);
-
-    FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
-    FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x7FF, 0, 0));
+	Init_Peripherals();
 
     LOG_INFO("Waiting for ID 0x%X...\r\n", RX_MSG_ID);
 
