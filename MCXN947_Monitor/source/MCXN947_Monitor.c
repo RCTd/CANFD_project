@@ -17,31 +17,27 @@
 flexcan_handle_t flexcanHandle;
 flexcan_fd_frame_t rxFrame;
 flexcan_fd_frame_t txFrame;
-flexcan_mb_transfer_t txXfer; /* Transfer structure for Non-Blocking API */
+flexcan_mb_transfer_t txXfer;
 volatile bool txComplete = false;
 
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
 static void FLEXCAN_PHY_Config_Safe(void);
-static void SetNextTrafficLight(traffic_state_t *currentState);
 
 /*******************************************************************************
  * Code
  ******************************************************************************/
 
-/* FIXED: Callback result type changed to uint64_t to match driver signature */
 static void flexcan_callback(CAN_Type *base, flexcan_handle_t *handle, status_t status, uint64_t result, void *userData)
 {
     if (status == kStatus_FLEXCAN_TxIdle)
     {
         txComplete = true;
     }
-    /* We don't need to handle RX here because we are polling in main for simplicity,
-       but we NEED this callback for the PHY Config Non-Blocking send. */
 }
 
-/* Safe PHY Configuration with Timeout */
+/* Safe PHY Configuration with Timeout and Error Reporting */
 static void FLEXCAN_PHY_Config_Safe(void)
 {
     /* Use MB0 for temporary transmission */
@@ -53,11 +49,10 @@ static void FLEXCAN_PHY_Config_Safe(void)
 
     gpio_pin_config_t out_cfg = { kGPIO_DigitalOutput, 0 };
 
-	GPIO_PinInit(RED_PORT, RED_PIN, &out_cfg);
-	GPIO_PinInit(YEL_PORT, YEL_PIN, &out_cfg);
-	GPIO_PinInit(GRN_PORT, GRN_PIN, &out_cfg);
+    GPIO_PinInit(RED_PORT, RED_PIN, &out_cfg);
+    GPIO_PinInit(YEL_PORT, YEL_PIN, &out_cfg);
+    GPIO_PinInit(GRN_PORT, GRN_PIN, &out_cfg);
 
-    /* Prepare Handshake Frame */
     txFrame.id = FLEXCAN_ID_STD(0x555);
     txFrame.format = (uint8_t)kFLEXCAN_FrameFormatStandard;
     txFrame.type = (uint8_t)kFLEXCAN_FrameTypeData;
@@ -65,16 +60,13 @@ static void FLEXCAN_PHY_Config_Safe(void)
     txFrame.edl = 0U;
     txFrame.brs = 0U;
 
-    /* FIXED: Assign mbIdx to the transfer structure, not the frame */
     txXfer.mbIdx = 0;
     txXfer.framefd = &txFrame;
 
     txComplete = false;
 
-    /* Start Non-Blocking Send using the Transfer structure */
     FLEXCAN_TransferFDSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &txXfer);
 
-    /* Wait with Timeout */
     volatile uint32_t timeout = 1000000;
     while (!txComplete && timeout > 0)
     {
@@ -83,102 +75,70 @@ static void FLEXCAN_PHY_Config_Safe(void)
 
     if (timeout == 0)
     {
-        LOG_INFO("PHY Config Timeout (No Bus ACK). Aborting...\r\n");
+        /* UPDATED: Explicit Error Message */
+        LOG_INFO("Transmission Error: PHY Config Timeout (No Bus ACK).\r\n");
         FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, 0);
     }
     else
     {
-        LOG_INFO("PHY Config ACK Received.\r\n");
+        LOG_INFO("PHY Config ACK Received (Transmission Success).\r\n");
     }
 
     GPIO_PortClear(EXAMPLE_STB_RGPIO, 1u << EXAMPLE_STB_RGPIO_PIN);
 }
 
 static void Init_Peripherals(void){
-	flexcan_config_t flexcanConfig;
-	flexcan_rx_mb_config_t mbConfig;
-	gpio_pin_config_t led_config = {kGPIO_DigitalOutput, 1};
+    flexcan_config_t flexcanConfig;
+    flexcan_rx_mb_config_t mbConfig;
+    gpio_pin_config_t led_config = {kGPIO_DigitalOutput, 1};
 
-	BOARD_InitHardware();
-	LOG_INFO("--- No-Hang CAN FD Receiver ---\r\n");
+    BOARD_InitHardware();
+    LOG_INFO("--- FRDM-MCXN947 Universal CAN Sniffer ---\r\n");
 
-	GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
+    GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
 
-	FLEXCAN_GetDefaultConfig(&flexcanConfig);
-//    flexcanConfig.bitRate = 500000U;
-	flexcanConfig.bitRateFD = 2000000U;
+    FLEXCAN_GetDefaultConfig(&flexcanConfig);
+    flexcanConfig.bitRateFD = 2000000U;
 
 #if defined(EXAMPLE_CAN_CLK_SOURCE)
-	flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
+    flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
 #endif
 
-	flexcan_timing_config_t timing_config;
-	memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
-	if (FLEXCAN_FDCalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.bitRate, flexcanConfig.bitRateFD,
-												EXAMPLE_CAN_CLK_FREQ, &timing_config))
-	{
-		memcpy(&(flexcanConfig.timingConfig), &timing_config, sizeof(flexcan_timing_config_t));
-	}
-
-	FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
-
-	/* Create Handle for Interrupt Support */
-	FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
-
-	/* Safe PHY Config */
-	FLEXCAN_PHY_Config_Safe();
-
-	/* Setup Receive Message Buffer (MB9) */
-	mbConfig.format = kFLEXCAN_FrameFormatStandard;
-	mbConfig.type   = kFLEXCAN_FrameTypeData;
-	mbConfig.id     = FLEXCAN_ID_STD(RX_MSG_ID);
-
-	FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
-	FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x7FF, 0, 0));
-}
-
-/* Function now handles incrementing the state AND setting GPIOs */
-static void SetNextTrafficLight(traffic_state_t *currentState)
-{
-    /* 1. Increment the value pointed to by currentState */
-    *currentState = (traffic_state_t)((*currentState + 1) % 4);
-
-    /* 2. Turn off all lights first */
-    GPIO_PinWrite(RED_PORT, RED_PIN, 0U);
-    GPIO_PinWrite(YEL_PORT, YEL_PIN, 0U);
-    GPIO_PinWrite(GRN_PORT, GRN_PIN, 0U);
-
-    /* 3. Check the new state value */
-    switch(*currentState) {
-        case STATE_RED:
-            GPIO_PinWrite(RED_PORT, RED_PIN, 1U);
-            PRINTF("ROSU\r\n");
-            break;
-        case STATE_YEL:
-            GPIO_PinWrite(YEL_PORT, YEL_PIN, 1U);
-            PRINTF("GALBEN\r\n");
-            break;
-        case STATE_GRN:
-            GPIO_PinWrite(GRN_PORT, GRN_PIN, 1U);
-            PRINTF("VERDE\r\n");
-            break;
-        case STATE_OFF:
-            PRINTF("OPRIT\r\n");
-            break;
+    flexcan_timing_config_t timing_config;
+    memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
+    if (FLEXCAN_FDCalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.bitRate, flexcanConfig.bitRateFD,
+                                                EXAMPLE_CAN_CLK_FREQ, &timing_config))
+    {
+        memcpy(&(flexcanConfig.timingConfig), &timing_config, sizeof(flexcan_timing_config_t));
     }
+
+    FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
+
+    FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
+
+    FLEXCAN_PHY_Config_Safe();
+
+    /* Setup Receive Message Buffer (MB9) */
+    mbConfig.format = kFLEXCAN_FrameFormatStandard;
+    mbConfig.type   = kFLEXCAN_FrameTypeData;
+    mbConfig.id     = FLEXCAN_ID_STD(0x000); /* ID doesn't matter with mask 0 */
+
+    FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
+
+    /* UPDATED: Set Mask to 0x000 to accept ANY Standard ID */
+    FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x000, 0, 0));
 }
+
 
 int main(void)
 {
-	traffic_state_t state = STATE_OFF;
-	Init_Peripherals();
+    Init_Peripherals();
 
-    LOG_INFO("Waiting for ID 0x%X...\r\n", RX_MSG_ID);
+    LOG_INFO("Listening for ANY CAN message...\r\n");
 
     while (1)
     {
-        /* Polling check using Flags (Non-blocking) */
-        /* Use 1ULL to ensure 64-bit shift safety */
+        /* Check MB Status Flags */
         if (FLEXCAN_GetMbStatusFlags(EXAMPLE_CAN, (1ULL << RX_MESSAGE_BUFFER_NUM)))
         {
             FLEXCAN_ClearMbStatusFlags(EXAMPLE_CAN, (1ULL << RX_MESSAGE_BUFFER_NUM));
@@ -187,13 +147,33 @@ int main(void)
 
             if (status == kStatus_Success)
             {
-                LOG_INFO("RX ID: 0x%X [Data: 0x%02X]\r\n",
-                         rxFrame.id >> CAN_ID_STD_SHIFT,
-                         (uint8_t)rxFrame.dataWord[0]);
+                /* UPDATED: Print ID and ALL Data Bytes */
+                PRINTF("RX ID: 0x%X | DLC: %d | Data: ",
+                       rxFrame.id >> CAN_ID_STD_SHIFT,
+                       rxFrame.length);
 
-                GPIO_PortToggle(BOARD_LED_GPIO, 1U << BOARD_LED_GPIO_PIN);
+                /* Note: In FlexCAN FD, frame.length is the DLC code.
+                   For standard CAN 0-8, it maps directly to bytes.
+                   For FD > 8, you would typically use a helper to get bytes.
+                   Here we print based on the raw DLC code assuming standard <=8 for simplicity
+                   or use the dataWord array. */
 
-                SetNextTrafficLight(&state);
+                uint8_t *dataBytes = (uint8_t *)&rxFrame.dataWord[0];
+                /* Assuming standard frame <= 8 bytes for simple print loop.
+                   Use specific DLC lookup for FD frames > 8 bytes. */
+                uint32_t byteCount = (rxFrame.length > 8) ? 8 : rxFrame.length;
+
+                for (uint32_t i = 0; i < byteCount; i++)
+                {
+                    PRINTF("0x%02X ", dataBytes[i]);
+                }
+                PRINTF("\r\n");
+
+            }
+            else
+            {
+                /* UPDATED: Print Error if Read Fails */
+                LOG_INFO("Error receiving message. Status code: %d\r\n", status);
             }
         }
     }
