@@ -36,6 +36,75 @@ void BOARD_InitPins(void)
         kPORT_MuxAlt2, kPORT_InputBufferEnable, kPORT_InputNormal, kPORT_UnlockRegister
     });
 
+    const port_pin_config_t port1_22_pinL4_config = {/* Internal pull-up/down resistor is disabled */
+													 kPORT_PullDisable,
+													 /* Low internal pull resistor value is selected. */
+													 kPORT_LowPullResistor,
+													 /* Fast slew rate is configured */
+													 kPORT_FastSlewRate,
+													 /* Passive input filter is disabled */
+													 kPORT_PassiveFilterDisable,
+													 /* Open drain output is disabled */
+													 kPORT_OpenDrainDisable,
+													 /* Low drive strength is configured */
+													 kPORT_LowDriveStrength,
+													 /* Pin is configured as SCT0_OUT4 */
+													 kPORT_MuxAlt5,
+													 /* Digital input enabled */
+													 kPORT_InputBufferEnable,
+													 /* Digital input is not inverted */
+													 kPORT_InputNormal,
+													 /* Pin Control Register fields [15:0] are not locked */
+													 kPORT_UnlockRegister};
+	/* PORT1_22 (pin L4) is configured as SCT0_OUT4 */
+	PORT_SetPinConfig(PORT1, 22U, &port1_22_pinL4_config);
+
+	const port_pin_config_t port1_23_pinM4_config = {/* Internal pull-up/down resistor is disabled */
+													 kPORT_PullDisable,
+													 /* Low internal pull resistor value is selected. */
+													 kPORT_LowPullResistor,
+													 /* Fast slew rate is configured */
+													 kPORT_FastSlewRate,
+													 /* Passive input filter is disabled */
+													 kPORT_PassiveFilterDisable,
+													 /* Open drain output is disabled */
+													 kPORT_OpenDrainDisable,
+													 /* Low drive strength is configured */
+													 kPORT_LowDriveStrength,
+													 /* Pin is configured as SCT0_OUT5 */
+													 kPORT_MuxAlt5,
+													 /* Digital input enabled */
+													 kPORT_InputBufferEnable,
+													 /* Digital input is not inverted */
+													 kPORT_InputNormal,
+													 /* Pin Control Register fields [15:0] are not locked */
+													 kPORT_UnlockRegister};
+	/* PORT1_23 (pin M4) is configured as SCT0_OUT5 */
+	PORT_SetPinConfig(PORT1, 23U, &port1_23_pinM4_config);
+
+	const port_pin_config_t port1_6_pinD2_config = {/* Internal pull-up/down resistor is disabled */
+														kPORT_PullUp,
+														/* Low internal pull resistor value is selected. */
+														kPORT_LowPullResistor,
+														/* Fast slew rate is configured */
+														kPORT_FastSlewRate,
+														/* Passive input filter is disabled */
+														kPORT_PassiveFilterDisable,
+														/* Open drain output is disabled */
+														kPORT_OpenDrainDisable,
+														/* Low drive strength is configured */
+														kPORT_LowDriveStrength,
+														/* Pin is configured as FC4_P1 */
+														kPORT_MuxAsGpio,
+														/* Digital input enabled */
+														kPORT_InputBufferEnable,
+														/* Digital input is not inverted */
+														kPORT_InputNormal,
+														/* Pin Control Register fields [15:0] are not locked */
+														kPORT_UnlockRegister};
+		/* PORT1_6 (pin D2) is configured as asdsad */
+		PORT_SetPinConfig(PORT1, 6U, &port1_6_pinD2_config);
+
 	/* --- SW2 Configuration (PORT0 Pin 23) --- */
 	const port_pin_config_t sw2_config = {
 		kPORT_PullUp,               /* Internal pull-up resistor is enabled */

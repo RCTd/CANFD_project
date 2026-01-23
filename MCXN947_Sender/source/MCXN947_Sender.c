@@ -8,6 +8,7 @@
 #include "fsl_gpio.h"
 #include "fsl_port.h"
 #include "fsl_ctimer.h"
+#include "fsl_sctimer.h" /* Added SCTimer Header */
 #include "fsl_common.h"
 #include "board.h"
 #include "app.h"
@@ -19,7 +20,6 @@
 /* RX_MESSAGE_BUFFER_NUM is defined in app.h */
 
 /* --- LOGGING CONFIGURATION --- */
-/* Uncomment the line below to enable State Change logging */
 //#define LOGCHANGES
 
 #ifdef LOGCHANGES
@@ -27,7 +27,6 @@
 #else
     #define LOG_STATE(...)
 #endif
-/* ----------------------------- */
 
 typedef enum
 {
@@ -50,6 +49,7 @@ typedef struct
 volatile app_state_t g_currentState = STATE_LISTEN;
 volatile bool g_timerExpired = false;
 volatile bool g_rxReceived = false;
+volatile bool g_triggerSensorRead = false; /* Flag to trigger read from Main */
 
 /* FIFO Variables */
 volatile can_msg_t fifo_buffer[FIFO_SIZE];
@@ -66,7 +66,7 @@ flexcan_mb_transfer_t rxXfer;
 volatile bool txComplete = true;
 volatile bool txError = false;
 
-static ctimer_match_config_t matchConfig0;
+static ctimer_match_config_t matchConfig0; /* For State Machine Timeout */
 
 /*******************************************************************************
  * FIFO Helper Functions
@@ -126,14 +126,12 @@ void BOARD_SW3_IRQ_HANDLER(void)
 {
     uint32_t interruptFlags = GPIO_GpioGetInterruptFlags(GPIO0);
 
-    /* SW3 (P0_6) */
     if ((interruptFlags & (1U << BOARD_SW3_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW3_GPIO, 1U << BOARD_SW3_GPIO_PIN);
         FIFO_Push(TX_MSG_ID_TIMER, 0x33);
     }
 
-    /* SW2 (P0_23) */
     if ((interruptFlags & (1U << BOARD_SW2_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW2_GPIO, 1U << BOARD_SW2_GPIO_PIN);
@@ -142,6 +140,85 @@ void BOARD_SW3_IRQ_HANDLER(void)
     SDK_ISR_EXIT_BARRIER;
 }
 
+/* SCTimer Interrupt Handler for 2s Event */
+void SCT0_IRQHandler(void)
+{
+    /* Clear the Match Event Flag */
+    SCTIMER_ClearStatusFlags(SCT0, kSCTIMER_Event0Flag);
+
+    /* We set a flag here instead of reading the sensor.
+       Reading DHT22 takes ~20ms and blocks. Doing that in ISR is dangerous. */
+    g_triggerSensorRead = true;
+
+    SDK_ISR_EXIT_BARRIER;
+}
+
+bool read_dht22(float *humidity, float *temperature) {
+    uint8_t data[5] = {0};
+
+    // 1. Start Signal: Pull low for 18ms
+    gpio_pin_config_t gpio_out_config = {kGPIO_DigitalOutput, 1};
+    GPIO_PinInit(DHT_PORT, DHT_PIN, &gpio_out_config);
+    GPIO_PinWrite(DHT_PORT, DHT_PIN, 0U);
+    SDK_DelayAtLeastUs(18000, SystemCoreClock); // 18ms
+
+    // Pull high and switch to input
+    GPIO_PinWrite(DHT_PORT, DHT_PIN, 1U);
+    SDK_DelayAtLeastUs(40, SystemCoreClock);
+    gpio_pin_config_t gpio_in_config = {kGPIO_DigitalInput, 0};
+    GPIO_PinInit(DHT_PORT, DHT_PIN, &gpio_in_config);
+
+    // 2. Critical Section: Disable interrupts for precise timing
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    // Wait for sensor response (80us Low, 80us High)
+    uint32_t timeout = 20000;
+    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout); // Wait for our pull-up to end
+    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 0 && --timeout); // Sensor ACK Low
+    while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout); // Sensor ACK High
+
+    if(timeout == 0) {
+        __set_PRIMASK(primask); // Restore interrupts
+        return false;
+    }
+
+    // 3. Read 40 bits
+    for (int i = 0; i < 40; i++) {
+        // Wait for the 50us LOW preamble to finish
+        while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 0);
+
+        // Wait 40us (Threshold between '0' [28us] and '1' [70us])
+        SDK_DelayAtLeastUs(40, SystemCoreClock);
+
+        if(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1) {
+            data[i/8] |= (1 << (7 - (i % 8)));
+            timeout = 10000;
+            while(GPIO_PinRead(DHT_PORT, DHT_PIN) == 1 && --timeout);
+        }
+    }
+
+    __set_PRIMASK(primask); // Re-enable interrupts
+
+    // 4. Calculate Values
+    if (data[4] == ((data[0] + data[1] + data[2] + data[3]) & 0xFF)) {
+        float h_val = (float)((data[0] << 8) + data[1]) / 10.0f;
+        float t_val = (float)((data[2] << 8) + data[3]) / 10.0f;
+
+        // Simple formatting for CAN byte (casting to int for simplicity in this example)
+        int32_t h_int = (int32_t)h_val;
+        int32_t t_int = (int32_t)t_val;
+
+        LOG_INFO("Humidity: %d %% | Temp: %d C\r\n", h_int, t_int);
+        *humidity = h_val;
+        *temperature = t_val;
+        return true;
+    }
+
+    return false;
+}
+
+/* Callback for CTIMER Match 0 - State Machine Timeout */
 void ctimer_match0_callback(uint32_t flags)
 {
     CTIMER_StopTimer(CTIMER);
@@ -158,6 +235,7 @@ ctimer_callback_t ctimer_callback_table[] = {
 
 static void Restart_Timer_ms(uint32_t ms)
 {
+    /* This manages Channel 0 for the State Machine */
     CTIMER_StopTimer(CTIMER);
     CTIMER_Reset(CTIMER);
     g_timerExpired = false;
@@ -223,6 +301,40 @@ static void FLEXCAN_PHY_Config_Safe(void)
     GPIO_PortClear(EXAMPLE_STB_RGPIO, 1u << EXAMPLE_STB_RGPIO_PIN);
 }
 
+static void Init_SCTimer_2s(void)
+{
+    sctimer_config_t sctimerInfo;
+    uint32_t eventCounter;
+    uint32_t matchValue;
+
+    SCTIMER_GetDefaultConfig(&sctimerInfo);
+
+    /* Use Unified 32-bit counter to safely reach 2 seconds.
+       16-bit counters on high speed clocks often overflow before 2s. */
+    sctimerInfo.enableCounterUnify = true;
+    sctimerInfo.clockMode = kSCTIMER_System_ClockMode;
+
+    SCTIMER_Init(SCT0, &sctimerInfo);
+
+    /* Calculate match value for 2000ms */
+    matchValue = MSEC_TO_COUNT(2000U, SCTIMER_CLK_FREQ);
+
+    /* Schedule the event. This returns the event ID into eventCounter */
+    SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, matchValue, 0, kSCTIMER_Counter_U, &eventCounter);
+
+    /* Reset the counter when this event occurs (to make it periodic) */
+    SCTIMER_SetupCounterLimitAction(SCT0, kSCTIMER_Counter_U, eventCounter);
+
+    /* Enable Interrupts for this event */
+    SCTIMER_EnableInterrupts(SCT0, 1 << eventCounter);
+
+    /* Enable NVIC for SCTimer */
+    EnableIRQ(SCT0_IRQn);
+
+    /* Start the Timer */
+    SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
+}
+
 /*******************************************************************************
  * Initialization Function
  ******************************************************************************/
@@ -235,7 +347,8 @@ static void Init_Peripherals(void)
     flexcan_rx_mb_config_t mbConfig;
 
     BOARD_InitHardware();
-    LOG_INFO("--- CAN State Machine (Abort Logic Enabled) ---\r\n");
+
+    LOG_INFO("--- CAN State Machine (SCTimer 2s Enabled) ---\r\n");
 
     /* GPIO */
     GPIO_SetPinInterruptConfig(BOARD_SW3_GPIO, BOARD_SW3_GPIO_PIN, kGPIO_InterruptFallingEdge);
@@ -244,7 +357,7 @@ static void Init_Peripherals(void)
     GPIO_PinInit(BOARD_SW2_GPIO, BOARD_SW2_GPIO_PIN, &sw_config);
     EnableIRQ(BOARD_SW3_IRQ);
 
-    /* CTimer */
+    /* CTimer - Used for State Machine Timeouts */
     CTIMER_GetDefaultConfig(&ctimerConfig);
     CTIMER_Init(CTIMER, &ctimerConfig);
 
@@ -254,8 +367,12 @@ static void Init_Peripherals(void)
     matchConfig0.outControl = kCTIMER_Output_NoAction;
     matchConfig0.outPinInitState = false;
     matchConfig0.enableInterrupt = true;
+
     CTIMER_RegisterCallBack(CTIMER, &ctimer_callback_table[0], kCTIMER_MultipleCallback);
     EnableIRQ(CTIMER_IRQ_ID);
+
+    /* SCTimer - Used for Periodic 2s Sensor Read */
+    Init_SCTimer_2s();
 
     /* FlexCAN */
     FLEXCAN_GetDefaultConfig(&flexcanConfig);
@@ -302,11 +419,29 @@ int main(void)
 
     g_currentState = STATE_LISTEN;
     LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
-    Restart_Timer_ms(1000);
+    Restart_Timer_ms(LISTENTIMEMS);
     g_rxReceived = false;
 
     while (1)
     {
+        /* Check if SCTimer triggered a sensor read */
+        if (g_triggerSensorRead)
+        {
+            g_triggerSensorRead = false;
+
+            float humidity = 0.0f;
+            float temperature = 0.0f;
+
+            if (read_dht22(&humidity, &temperature)) {
+                LOG_INFO("Reading done \r\n");
+            } else {
+                LOG_INFO("Sensor Read Failed\r\n");
+            }
+            /* Push data as integers to CAN FIFO */
+            FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)humidity);
+            FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)temperature);
+        }
+
         /***********************************************************************
          * STATE: LISTEN
          **********************************************************************/
@@ -318,16 +453,14 @@ int main(void)
                 g_rxReceived = false;
                 g_currentState = STATE_WAIT;
                 LOG_STATE("[STATE] -> WAIT (500ms)\r\n");
-                Restart_Timer_ms(500);
+                Restart_Timer_ms(WAITTIMEMS);
             }
             else if (g_timerExpired)
             {
             	LOG_STATE("Event: Timer Expired (Listen)\r\n");
-            	/* Kill the stuck message */
-				FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
                 g_currentState = STATE_SEND;
                 LOG_STATE("[STATE] -> SEND (1000ms)\r\n");
-                Restart_Timer_ms(1000);
+                Restart_Timer_ms(SENDTIMEMS);
             }
         }
 
@@ -337,6 +470,14 @@ int main(void)
         else if (g_currentState == STATE_SEND)
         {
             bool fifoHasData;
+
+            /* ABORT LOGIC */
+            if (!txComplete)
+            {
+                LOG_INFO("Previous Tx Stuck. Aborting.\r\n");
+                FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
+                txComplete = true;
+            }
 
             __disable_irq();
             fifoHasData = !FIFO_IsEmpty();
@@ -348,25 +489,31 @@ int main(void)
                 g_rxReceived = false;
                 g_currentState = STATE_WAIT;
                 LOG_STATE("[STATE] -> WAIT (500ms)\r\n");
-                Restart_Timer_ms(500);
+                Restart_Timer_ms(WAITTIMEMS);
             }
             else if (fifoHasData)
             {
-
-                /* 1. Unconditionally POP the item first */
                 __disable_irq();
                 bool popped = FIFO_Pop(&nextMsg);
                 __enable_irq();
 
                 if (popped)
                 {
-                    /* 2. Attempt Send */
-                    SendCanMessageNonBlocking(nextMsg.id, nextMsg.dataByte);
+                    status_t txStatus = SendCanMessageNonBlocking(nextMsg.id, nextMsg.dataByte);
 
-                    /* 4. Transition State regardless of success/failure */
+                    if (txStatus == kStatus_Success)
+                    {
+                        LOG_INFO("Tx Queued.\r\n");
+                    }
+                    else
+                    {
+                        LOG_INFO("Tx Failed (Stat: %d). Item Discarded.\r\n", txStatus);
+                        txComplete = true;
+                    }
+
                     g_currentState = STATE_LISTEN;
                     LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
-                    Restart_Timer_ms(1000);
+                    Restart_Timer_ms(LISTENTIMEMS);
                 }
             }
             else if (g_timerExpired)
@@ -374,7 +521,7 @@ int main(void)
             	LOG_STATE("Event: Timer Expired (Send)\r\n");
                 g_currentState = STATE_LISTEN;
                 LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
-                Restart_Timer_ms(1000);
+                Restart_Timer_ms(LISTENTIMEMS);
             }
         }
 
@@ -387,16 +534,14 @@ int main(void)
             {
                 LOG_INFO("Event: CAN Msg Received (Wait) -> Resetting Wait\r\n");
                 g_rxReceived = false;
-                Restart_Timer_ms(500);
+                Restart_Timer_ms(WAITTIMEMS);
             }
             else if (g_timerExpired)
             {
                 LOG_INFO("Event: Wait Finished\r\n");
-                /* Kill the stuck message */
-				FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
                 g_currentState = STATE_SEND;
                 LOG_STATE("[STATE] -> SEND (1000ms)\r\n");
-                Restart_Timer_ms(1000);
+                Restart_Timer_ms(SENDAFTERWAITTIMEMS);
             }
         }
     }

@@ -23,6 +23,10 @@ void BOARD_InitHardware(void)
     CLOCK_SetClkDiv(kCLOCK_DivCtimer4Clk, 1u);
     CLOCK_AttachClk(kFRO_HF_to_CTIMER4);
 
+    /* attach FRO HF to SCT */
+	CLOCK_SetClkDiv(kCLOCK_DivSctClk, 1u);
+	CLOCK_AttachClk(kFRO_HF_to_SCT);
+
     /* Enable clocks for GPIOs */
     CLOCK_EnableClock(kCLOCK_Gpio0); /* For Switch */
     CLOCK_EnableClock(kCLOCK_Gpio3); /* For TJA1152 STB */

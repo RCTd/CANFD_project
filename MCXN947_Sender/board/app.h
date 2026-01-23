@@ -9,6 +9,11 @@
  * Definitions
  ******************************************************************************/
 
+#define LISTENTIMEMS 10
+#define WAITTIMEMS 2
+#define SENDTIMEMS LISTENTIMEMS
+#define SENDAFTERWAITTIMEMS LISTENTIMEMS-WAITTIMEMS
+
 /* --- CAN FD Definitions --- */
 #define USE_CANFD                     (1U)
 #define EXAMPLE_CAN                   CAN0
@@ -31,12 +36,20 @@
 #define TX_MSG_ID_BUTTON2             0x124UL
 #define TX_MSG_ID_TIMER               0x321UL
 
+
+#define DHT_PORT GPIO1
+#define DHT_PIN 6U
+
 /* --- CTimer Definitions --- */
 #define CTIMER                        CTIMER4
 #define CTIMER_CLK_FREQ               CLOCK_GetCTimerClkFreq(4U)
 #define CTIMER_MAT0_OUT               kCTIMER_Match_0
 #define CTIMER_IRQ_HANDLER            CTIMER4_IRQHandler
 #define CTIMER_IRQ_ID                 CTIMER4_IRQn
+
+#define SCTIMER_CLK_FREQ        CLOCK_GetFreq(kCLOCK_BusClk)
+#define DEMO_FIRST_SCTIMER_OUT  kSCTIMER_Out_4
+#define DEMO_SECOND_SCTIMER_OUT kSCTIMER_Out_5
 
 /* --- TJA1152 Transceiver --- */
 #define EXAMPLE_STB_RGPIO             GPIO3
