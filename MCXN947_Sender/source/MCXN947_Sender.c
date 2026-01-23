@@ -18,6 +18,17 @@
 #define FIFO_SIZE 16
 /* RX_MESSAGE_BUFFER_NUM is defined in app.h */
 
+/* --- LOGGING CONFIGURATION --- */
+/* Uncomment the line below to enable State Change logging */
+//#define LOGCHANGES
+
+#ifdef LOGCHANGES
+    #define LOG_STATE(...) LOG_INFO(__VA_ARGS__)
+#else
+    #define LOG_STATE(...)
+#endif
+/* ----------------------------- */
+
 typedef enum
 {
     STATE_LISTEN,
@@ -96,9 +107,7 @@ static void flexcan_callback(CAN_Type *base, flexcan_handle_t *handle, status_t 
     }
     else if (status == kStatus_FLEXCAN_RxIdle)
     {
-        /* Because disableSelfReception is TRUE, this only triggers for external messages */
         g_rxReceived = true;
-
         rxXfer.mbIdx = RX_MESSAGE_BUFFER_NUM;
         rxXfer.framefd = &rxFrame;
         FLEXCAN_TransferFDReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rxXfer);
@@ -159,7 +168,7 @@ static void Restart_Timer_ms(uint32_t ms)
     CTIMER_StartTimer(CTIMER);
 }
 
-static void SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
+static status_t SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
 {
     txFrame.id     = FLEXCAN_ID_STD(id);
     txFrame.format = (uint8_t)kFLEXCAN_FrameFormatStandard;
@@ -177,7 +186,13 @@ static void SendCanMessageNonBlocking(uint32_t id, uint8_t dataByte)
     LOG_INFO(">> Sending MSG (ID: 0x%X)...\r\n", id);
 
     status_t status = FLEXCAN_TransferFDSendNonBlocking(EXAMPLE_CAN, &flexcanHandle, &txXfer);
-    if (status != kStatus_Success) txComplete = true;
+
+    if (status != kStatus_Success)
+    {
+        txComplete = true;
+    }
+
+    return status;
 }
 
 static void FLEXCAN_PHY_Config_Safe(void)
@@ -220,7 +235,7 @@ static void Init_Peripherals(void)
     flexcan_rx_mb_config_t mbConfig;
 
     BOARD_InitHardware();
-    LOG_INFO("--- CAN State Machine (Self-Reception Disabled) ---\r\n");
+    LOG_INFO("--- CAN State Machine (Abort Logic Enabled) ---\r\n");
 
     /* GPIO */
     GPIO_SetPinInterruptConfig(BOARD_SW3_GPIO, BOARD_SW3_GPIO_PIN, kGPIO_InterruptFallingEdge);
@@ -244,10 +259,7 @@ static void Init_Peripherals(void)
 
     /* FlexCAN */
     FLEXCAN_GetDefaultConfig(&flexcanConfig);
-
-    /* [CRITICAL] Disable Self Reception (Hardware Loopback Prevention) */
     flexcanConfig.disableSelfReception = true;
-
     flexcanConfig.bitRateFD = 2000000U;
 #if defined(EXAMPLE_CAN_CLK_SOURCE)
     flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
@@ -264,10 +276,8 @@ static void Init_Peripherals(void)
     FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
     FLEXCAN_PHY_Config_Safe();
 
-    /* Setup TX Message Buffer */
     FLEXCAN_SetFDTxMbConfig(EXAMPLE_CAN, TX_MESSAGE_BUFFER_NUM, true);
 
-    /* Setup RX Message Buffer Configuration */
     mbConfig.format = kFLEXCAN_FrameFormatStandard;
     mbConfig.type   = kFLEXCAN_FrameTypeData;
     mbConfig.id     = FLEXCAN_ID_STD(0);
@@ -275,7 +285,6 @@ static void Init_Peripherals(void)
     FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
     FLEXCAN_SetRxMbGlobalMask(EXAMPLE_CAN, FLEXCAN_RX_MB_STD_MASK(0, 0, 0));
 
-    /* Start receiving */
     rxXfer.mbIdx = RX_MESSAGE_BUFFER_NUM;
     rxXfer.framefd = &rxFrame;
     FLEXCAN_TransferFDReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rxXfer);
@@ -291,9 +300,8 @@ int main(void)
     Init_Peripherals();
     can_msg_t nextMsg;
 
-    /* Start Initial State */
     g_currentState = STATE_LISTEN;
-    LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+    LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
     Restart_Timer_ms(1000);
     g_rxReceived = false;
 
@@ -308,17 +316,17 @@ int main(void)
             {
                 LOG_INFO("Event: CAN Msg Received (Listen)\r\n");
                 g_rxReceived = false;
-
                 g_currentState = STATE_WAIT;
-                LOG_INFO("[STATE] -> WAIT (500ms)\r\n");
+                LOG_STATE("[STATE] -> WAIT (500ms)\r\n");
                 Restart_Timer_ms(500);
             }
             else if (g_timerExpired)
             {
-                LOG_INFO("Event: Timer Expired (Listen)\r\n");
-
+            	LOG_STATE("Event: Timer Expired (Listen)\r\n");
+            	/* Kill the stuck message */
+				FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
                 g_currentState = STATE_SEND;
-                LOG_INFO("[STATE] -> SEND (1000ms)\r\n");
+                LOG_STATE("[STATE] -> SEND (1000ms)\r\n");
                 Restart_Timer_ms(1000);
             }
         }
@@ -338,32 +346,34 @@ int main(void)
             {
                 LOG_INFO("Event: CAN Msg Received (Send)\r\n");
                 g_rxReceived = false;
-
                 g_currentState = STATE_WAIT;
-                LOG_INFO("[STATE] -> WAIT (500ms)\r\n");
+                LOG_STATE("[STATE] -> WAIT (500ms)\r\n");
                 Restart_Timer_ms(500);
             }
-            else if (fifoHasData && txComplete)
+            else if (fifoHasData)
             {
+
+                /* 1. Unconditionally POP the item first */
                 __disable_irq();
                 bool popped = FIFO_Pop(&nextMsg);
                 __enable_irq();
 
                 if (popped)
                 {
+                    /* 2. Attempt Send */
                     SendCanMessageNonBlocking(nextMsg.id, nextMsg.dataByte);
 
+                    /* 4. Transition State regardless of success/failure */
                     g_currentState = STATE_LISTEN;
-                    LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+                    LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
                     Restart_Timer_ms(1000);
                 }
             }
             else if (g_timerExpired)
             {
-                LOG_INFO("Event: Timer Expired (Send)\r\n");
-
+            	LOG_STATE("Event: Timer Expired (Send)\r\n");
                 g_currentState = STATE_LISTEN;
-                LOG_INFO("[STATE] -> LISTEN (1000ms)\r\n");
+                LOG_STATE("[STATE] -> LISTEN (1000ms)\r\n");
                 Restart_Timer_ms(1000);
             }
         }
@@ -382,9 +392,10 @@ int main(void)
             else if (g_timerExpired)
             {
                 LOG_INFO("Event: Wait Finished\r\n");
-
+                /* Kill the stuck message */
+				FLEXCAN_TransferFDAbortSend(EXAMPLE_CAN, &flexcanHandle, TX_MESSAGE_BUFFER_NUM);
                 g_currentState = STATE_SEND;
-                LOG_INFO("[STATE] -> SEND (1000ms)\r\n");
+                LOG_STATE("[STATE] -> SEND (1000ms)\r\n");
                 Restart_Timer_ms(1000);
             }
         }
