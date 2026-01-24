@@ -51,6 +51,7 @@ typedef enum {
 #define DHT_PIN  6U
 #define DHT_IRQn        GPIO10_IRQn
 #define DHT_IRQ_HANDLER GPIO10_IRQHandler
+#define DHT_TIMEOUT_THRESHOLD 10
 //
 //#define BOARD_SW3_IRQ         GPIO00_IRQn
 //#define BOARD_SW3_IRQ_HANDLER GPIO00_IRQHandler

@@ -59,6 +59,7 @@ volatile uint8_t  g_dhtBitIdx = 0;   /* Current bit index (0-39) */
 volatile uint32_t g_debug_pulses[50] = {0};
 volatile uint8_t  g_debug_index = 0;
 volatile uint32_t g_lastEdgeTime = 0;/* Timestamp of previous edge */
+volatile uint32_t g_dht_timeout_counter = 0;
 
 /* FIFO Variables */
 volatile can_msg_t fifo_buffer[FIFO_SIZE];
@@ -79,6 +80,7 @@ static ctimer_match_config_t matchConfig0; /* For State Machine Timeout */
 
 /* Forward declaration */
 void Start_DHT_Read(void);
+void DHT_HandleTimeout(void);
 
 /*******************************************************************************
  * FIFO Helper Functions
@@ -154,6 +156,8 @@ void BOARD_SW3_IRQ_HANDLER(void)
 
 void SCT0_IRQHandler(void)
 {
+
+	DHT_HandleTimeout();
     /* Clear SCTimer Flag */
     uint32_t status = SCT0->EVFLAG;
     SCT0->EVFLAG = status;
@@ -278,7 +282,7 @@ void Start_DHT_Read(void)
     /* Create Match Event for 18ms (18000us) */
     uint32_t eventId;
     /* Note: Since we fixed the prescaler to 1us, 18000 ticks = 18ms */
-    uint32_t matchValue = 18000U;
+    uint32_t matchValue = 18000U; //MSEC_TO_COUNT(18U, SCTIMER_CLK_FREQ); //18000U;
 
     SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, matchValue, 0, kSCTIMER_Counter_U, &eventId);
 
@@ -405,7 +409,7 @@ static void Init_SCTimer_2s(void)
     EnableIRQ(SCT0_IRQn);
 
     /* Start the Timer */
-    SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
+//    SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
 }
 
 /*******************************************************************************
@@ -480,6 +484,42 @@ static void Init_Peripherals(void)
     FLEXCAN_TransferFDReceiveNonBlocking(EXAMPLE_CAN, &flexcanHandle, &rxXfer);
 
     txComplete = true;
+}
+/**
+ * @brief Manages the software watchdog for the DHT state machine.
+ * Call this function inside your Main Loop.
+ */
+void DHT_HandleTimeout(void) {
+    if (g_dhtState != DHT_IDLE) {
+        g_dht_timeout_counter++;
+
+        /* Check if we have been stuck in a non-idle state for too long */
+        if (g_dht_timeout_counter > DHT_TIMEOUT_THRESHOLD) { /* 100ms threshold */
+
+            /* --- TIMEOUT RECOVERY --- */
+
+            /* 1. Disable Pin Interrupts properly for MCX N series */
+            GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, kGPIO_InterruptStatusFlagDisabled);
+            DisableIRQ(DHT_IRQn);
+
+            /* 2. Stop and clear the SCTimer */
+            SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
+            SCT0->COUNT = 0;
+
+            /* 3. Reset state variables */
+            g_dhtState = DHT_IDLE;
+            g_dht_timeout_counter = 0;
+            g_dhtBitIdx = 0;
+
+            /* 4. Force pin back to high-impedance input or high state */
+            gpio_pin_config_t in_config = {kGPIO_DigitalInput, 0};
+            GPIO_PinInit(DHT_GPIO, DHT_PIN, &in_config);
+
+            PRINTF("[DHT ERROR] State Timeout - Resetting to IDLE\r\n");
+        }
+    } else {
+        g_dht_timeout_counter = 0;
+    }
 }
 
 /*******************************************************************************
