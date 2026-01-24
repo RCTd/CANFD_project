@@ -53,8 +53,11 @@ volatile bool g_triggerSensorRead = false; /* Flag to trigger read from Main */
 
 
 volatile dht_state_t g_dhtState = DHT_IDLE;
+/* MCXN947_Sender.c - Top Variables Section */
 volatile uint32_t g_dhtBits[5];      /* Buffer for 40 bits (5 bytes) */
 volatile uint8_t  g_dhtBitIdx = 0;   /* Current bit index (0-39) */
+volatile uint32_t g_debug_pulses[50] = {0};
+volatile uint8_t  g_debug_index = 0;
 volatile uint32_t g_lastEdgeTime = 0;/* Timestamp of previous edge */
 
 /* FIFO Variables */
@@ -149,119 +152,106 @@ void BOARD_SW3_IRQ_HANDLER(void)
     SDK_ISR_EXIT_BARRIER;
 }
 
-/* SCTimer Interrupt Handler for 2s Event */
-//void SCT0_IRQHandler(void)
-//{
-//    /* Clear the Match Event Flag */
-//    SCTIMER_ClearStatusFlags(SCT0, kSCTIMER_Event0Flag);
-//
-//    /* We set a flag here instead of reading the sensor.
-//       Reading DHT22 takes ~20ms and blocks. Doing that in ISR is dangerous. */
-//    g_triggerSensorRead = true;
-//
-//    SDK_ISR_EXIT_BARRIER;
-//}
-
 void SCT0_IRQHandler(void)
 {
+    /* Clear SCTimer Flag */
     uint32_t status = SCT0->EVFLAG;
-    SCT0->EVFLAG = status; /* Clear flags */
+    SCT0->EVFLAG = status;
 
     if (g_dhtState == DHT_START_18MS)
     {
-        /* 18ms Low is done. Switch to Input/Listening Mode. */
-
-        /* Stop forcing Low, let Pull-up take it High */
+        /* 1. Switch to Input Mode */
         GPIO_PinWrite(DHT_GPIO, DHT_PIN, 1U);
-
-        /* Configure as Input */
         gpio_pin_config_t in_config = {kGPIO_DigitalInput, 0};
         GPIO_PinInit(DHT_GPIO, DHT_PIN, &in_config);
 
-        /* FIXED: Use SetPinInterruptConfig instead of PortEnableInterrupts */
-        GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, kGPIO_InterruptEitherEdge);
-
-        /* Enable IRQ in NVIC (Usually enabled in Init, but ensures it's on) */
+        /* 2. Configure Interrupts: FALLING EDGE ONLY */
+        /* Note: We clear any pending flags before enabling to prevent false triggers */
+        GPIO_GpioClearInterruptFlags(DHT_GPIO, 1U << DHT_PIN);
+        GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, kGPIO_InterruptFallingEdge);
         EnableIRQ(DHT_IRQn);
 
-        /* Reset Timer to 0 and let it run free for timestamping */
-        SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
-        SCT0->COUNT = 0;
-
-        /* FIXED: Use EV[0] instead of EVENT[0] */
-        SCT0->EV[0].STATE = 0;
-
-        SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
-
+        /* 3. Setup State Variables */
         g_dhtState = DHT_WAIT_RESPONSE;
-    }
+        g_debug_index = 0;
 
+        /* 4. Start Free-Running Timer (Don't stop/reset in ISRs) */
+        SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
+        SCT0->COUNT = 0; /* Start fresh from 0 */
+        g_lastEdgeTime = 0;
+        SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
+    }
     SDK_ISR_EXIT_BARRIER;
 }
 
 void DHT_IRQ_HANDLER(void)
 {
-    /* FIX 1: Use GPIO_GpioGetInterruptFlags */
+    /* Check correct pin */
     if (GPIO_GpioGetInterruptFlags(DHT_GPIO) & (1U << DHT_PIN))
     {
-        /* Clear Interrupt Flag */
         GPIO_GpioClearInterruptFlags(DHT_GPIO, 1U << DHT_PIN);
 
-        /* Read current timestamp (in us) */
-        uint32_t now = SCT0->COUNT;
-        uint32_t width = now - g_lastEdgeTime;
-        g_lastEdgeTime = now;
+        /* 1. Capture current time */
+        uint32_t current_time = SCT0->COUNT;
 
-        /* Current Pin State */
-        uint32_t pinState = GPIO_PinRead(DHT_GPIO, DHT_PIN);
+        /* 2. Calculate duration since last falling edge */
+        uint32_t width = current_time - g_lastEdgeTime;
+        g_lastEdgeTime = current_time;
+
+        /* 3. DEBUG: Save raw width to buffer (Don't overflow) */
+        if (g_debug_index < 50) {
+            g_debug_pulses[g_debug_index] = width;
+            g_debug_index++;
+        }
 
         switch (g_dhtState)
         {
             case DHT_WAIT_RESPONSE:
-                if (width > 60 && width < 100 && pinState == 0) {
+                /* Waiting for ACK. ACK is ~160us (80 low + 80 high).
+                 * We look for > 100us to filter out the initial start-up noise. */
+                if (width > 100)
+                {
                     g_dhtState = DHT_READING;
                     g_dhtBitIdx = 0;
+                    memset((void*)g_dhtBits, 0, sizeof(g_dhtBits));
                 }
                 break;
 
             case DHT_READING:
-                if (pinState == 0)
+                /* Decoding (Falling Edge to Falling Edge):
+                 * '0' = 50us Low + 26us High = ~76us
+                 * '1' = 50us Low + 70us High = ~120us
+                 * Threshold = 100us
+                 */
+                if (width > 100)
                 {
-                    if (width > 40)
-                    {
-                        g_dhtBits[g_dhtBitIdx / 8] |= (1 << (7 - (g_dhtBitIdx % 8)));
-                    }
-                    g_dhtBitIdx++;
+                    g_dhtBits[g_dhtBitIdx / 8] |= (1 << (7 - (g_dhtBitIdx % 8)));
+                }
 
-                    if (g_dhtBitIdx >= 40)
-                    {
-                        /* FIX 2: Pass 0 to disable the interrupt config */
-                        GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, (gpio_interrupt_config_t)0);
+                g_dhtBitIdx++;
 
-                        g_dhtState = DHT_IDLE;
-
-                        uint8_t sum = g_dhtBits[0] + g_dhtBits[1] + g_dhtBits[2] + g_dhtBits[3];
-                        if (g_dhtBits[4] == sum)
-                        {
-                            g_triggerSensorRead = true;
-                        }
-                        else
-                        {
-                            LOG_INFO("DHT Checksum Error\r\n");
-                        }
-                    }
+                /* Check if done (40 bits) */
+                if (g_dhtBitIdx >= 40)
+                {
+                    /* Stop interrupts */
+                    GPIO_SetPinInterruptConfig(DHT_GPIO, DHT_PIN, (gpio_interrupt_config_t)0);
+                    g_dhtState = DHT_IDLE;
+                    g_triggerSensorRead = true;
                 }
                 break;
-
             default: break;
         }
     }
     SDK_ISR_EXIT_BARRIER;
 }
 
+
 void Start_DHT_Read(void)
 {
-    if (g_dhtState != DHT_IDLE) return; /* Busy */
+    if (g_dhtState != DHT_IDLE){
+        LOG_INFO("Busy DHT22 Read (Async)\r\n");
+        return; /* Busy */
+    }
 
     LOG_INFO("Starting DHT22 Read (Async)...\r\n");
 
@@ -271,22 +261,31 @@ void Start_DHT_Read(void)
     memset((void*)g_dhtBits, 0, sizeof(g_dhtBits));
 
     /* 2. Pull Pin LOW for 18ms Start Signal */
-    gpio_pin_config_t out_config = {kGPIO_DigitalOutput, 0};
+    gpio_pin_config_t out_config = {kGPIO_DigitalOutput, 1};
     GPIO_PinInit(DHT_GPIO, DHT_PIN, &out_config);
     GPIO_PinWrite(DHT_GPIO, DHT_PIN, 0U);
 
     /* 3. Setup SCTimer for 18ms Timeout (One-Shot) */
     SCTIMER_StopTimer(SCT0, kSCTIMER_Counter_U);
+
+    /* --- FIX: ADD PRESCALER HERE --- */
     SCTIMER_Init(SCT0, &(sctimer_config_t){
-        .enableCounterUnify = true,
-        .clockMode = kSCTIMER_System_ClockMode,
-        .prescale_l = (SystemCoreClock / 1000000U) - 1U /* FIXED: prescale_l (lowercase) */
-    });
+            .enableCounterUnify = true,
+            .clockMode = kSCTIMER_System_ClockMode,
+            .prescale_l = (SystemCoreClock / 1000000U) - 1U  /* <--- THIS LINE WAS MISSING */
+        });
 
     /* Create Match Event for 18ms (18000us) */
     uint32_t eventId;
-    SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, 18000U, 0, kSCTIMER_Counter_U, &eventId);
+    /* Note: Since we fixed the prescaler to 1us, 18000 ticks = 18ms */
+    uint32_t matchValue = 18000U;
+
+    SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, matchValue, 0, kSCTIMER_Counter_U, &eventId);
+
+    /* Reset the counter when this event occurs */
+    SCTIMER_SetupCounterLimitAction(SCT0, kSCTIMER_Counter_U, eventId);
     SCTIMER_EnableInterrupts(SCT0, 1 << eventId);
+    EnableIRQ(SCT0_IRQn);
     SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
 }
 
@@ -498,35 +497,43 @@ int main(void)
 
     while (1)
     {
-//        /* Check if SCTimer triggered a sensor read */
-//        if (g_triggerSensorRead)
-//        {
-//            g_triggerSensorRead = false;
-//
-//            float humidity = 0.0f;
-//            float temperature = 0.0f;
-//
-//            if (read_dht22(&humidity, &temperature)) {
-//                LOG_INFO("Reading done \r\n");
-//            } else {
-//                LOG_INFO("Sensor Read Failed\r\n");
-//            }
-//            /* Push data as integers to CAN FIFO */
-//            FIFO_Push(TX_MSG_ID_RECEIVER1, (uint8_t)humidity);
-//            FIFO_Push(TX_MSG_ID_RECEIVER2, (uint8_t)temperature);
-//        }
     	if (g_triggerSensorRead)
     	{
     	    g_triggerSensorRead = false;
 
-    	    /* Convert Global Buffer to Values */
-    	    float h_val = (float)((g_dhtBits[0] << 8) + g_dhtBits[1]) / 10.0f;
-    	    float t_val = (float)((g_dhtBits[2] << 8) + g_dhtBits[3]) / 10.0f;
+    	    /* Verify Checksum */
+    	    uint8_t calcSum = (g_dhtBits[0] + g_dhtBits[1] + g_dhtBits[2] + g_dhtBits[3]) & 0xFF;
 
-    	    LOG_INFO("DHT Async Read: H=%.1f T=%.1f\r\n", h_val, t_val);
+    	    if (g_dhtBits[4] == calcSum && calcSum != 0)
+    	    {
+    	        /* Calculate Values */
+    	        float h_val = (float)((g_dhtBits[0] << 8) + g_dhtBits[1]) / 10.0f;
+    	        float t_val = (float)((g_dhtBits[2] << 8) + g_dhtBits[3]) / 10.0f;
 
-    	    FIFO_Push(TX_MSG_ID_RECEIVER1, (uint8_t)h_val);
-    	    FIFO_Push(TX_MSG_ID_RECEIVER2, (uint8_t)t_val);
+    	        /* Handle Negative Temperature Bit */
+    	        if (g_dhtBits[2] & 0x80) {
+    	            t_val = -1.0f * (float)(((g_dhtBits[2] & 0x7F) << 8) + g_dhtBits[3]) / 10.0f;
+    	        }
+
+    	        /* --- FIX: Manual Float Printing (avoids %f issues) --- */
+    	        int32_t h_int = (int32_t)h_val;
+    	        int32_t h_frac = (int32_t)((h_val - h_int) * 10);
+
+    	        int32_t t_int = (int32_t)t_val;
+    	        int32_t t_frac = (int32_t)((t_val - t_int) * 10);
+    	        if(t_frac < 0) t_frac *= -1; /* Handle sign for fraction */
+
+    	        LOG_INFO("DHT READ SUCCESS: Humidity: %d.%d %% | Temp: %d.%d C\r\n",
+    	                 h_int, h_frac, t_int, t_frac);
+
+    	        /* Push to CAN FIFO */
+    	        FIFO_Push(TX_MSG_ID_RECEIVER1, (uint8_t)h_val);
+    	        FIFO_Push(TX_MSG_ID_RECEIVER2, (uint8_t)t_val);
+    	    }
+    	    else
+    	    {
+    	        LOG_INFO("DHT Checksum Error: Rcv 0x%02X != Calc 0x%02X\r\n", g_dhtBits[4], calcSum);
+    	    }
     	}
 
         /***********************************************************************

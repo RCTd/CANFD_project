@@ -9,9 +9,9 @@
  * Definitions
  ******************************************************************************/
 
-#define SENDER1 1U
+#define SENDER1 2U
 #define LISTENTIMEMS 10
-#define WAITTIMEMS 2
+#define WAITTIMEMS 6
 #define SENDTIMEMS LISTENTIMEMS
 #define SENDAFTERWAITTIMEMS LISTENTIMEMS-WAITTIMEMS
 
@@ -51,6 +51,9 @@ typedef enum {
 #define DHT_PIN  6U
 #define DHT_IRQn        GPIO10_IRQn
 #define DHT_IRQ_HANDLER GPIO10_IRQHandler
+//
+//#define BOARD_SW3_IRQ         GPIO00_IRQn
+//#define BOARD_SW3_IRQ_HANDLER GPIO00_IRQHandler
 //#define DHT_PORT GPIO1
 //#define DHT_PIN 6U
 
