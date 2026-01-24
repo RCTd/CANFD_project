@@ -98,7 +98,21 @@ static void Init_Peripherals(void){
     GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
 
     FLEXCAN_GetDefaultConfig(&flexcanConfig);
-    flexcanConfig.bitRateFD = 2000000U;
+
+    /* ------------------------------------------------------ */
+    /* CRITICAL FIXES FOR MONITORING                          */
+    /* ------------------------------------------------------ */
+
+    /* 1. Enable Individual Masks so we can set a "Promiscuous" mask */
+    flexcanConfig.enableIndividMask = true;
+
+
+    /* 3. Explicitly set Baud Rate (Match your Master!) */
+    /* Default is often 1Mbps. Most tools use 500kbps. Adjust if needed. */
+//    flexcanConfig.bitRate = 500000U;    // Nominal (Header) Speed
+    flexcanConfig.bitRateFD = 2000000U; // Data Phase Speed (if FD)
+
+    /* ------------------------------------------------------ */
 
 #if defined(EXAMPLE_CAN_CLK_SOURCE)
     flexcanConfig.clkSrc = EXAMPLE_CAN_CLK_SOURCE;
@@ -106,6 +120,8 @@ static void Init_Peripherals(void){
 
     flexcan_timing_config_t timing_config;
     memset(&timing_config, 0, sizeof(flexcan_timing_config_t));
+
+    /* Calculate Timing */
     if (FLEXCAN_FDCalculateImprovedTimingValues(EXAMPLE_CAN, flexcanConfig.bitRate, flexcanConfig.bitRateFD,
                                                 EXAMPLE_CAN_CLK_FREQ, &timing_config))
     {
@@ -114,18 +130,21 @@ static void Init_Peripherals(void){
 
     FLEXCAN_FDInit(EXAMPLE_CAN, &flexcanConfig, EXAMPLE_CAN_CLK_FREQ, BYTES_IN_MB, true);
 
+    /* Create Handle (Required for the TX function to work) */
     FLEXCAN_TransferCreateHandle(EXAMPLE_CAN, &flexcanHandle, flexcan_callback, NULL);
 
+    /* Do the Safe PHY Config (This was working, so keep it) */
     FLEXCAN_PHY_Config_Safe();
 
     /* Setup Receive Message Buffer (MB9) */
     mbConfig.format = kFLEXCAN_FrameFormatStandard;
     mbConfig.type   = kFLEXCAN_FrameTypeData;
-    mbConfig.id     = FLEXCAN_ID_STD(0x000); /* ID doesn't matter with mask 0 */
+    mbConfig.id     = FLEXCAN_ID_STD(0x000);
 
     FLEXCAN_SetFDRxMbConfig(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, &mbConfig, true);
 
-    /* UPDATED: Set Mask to 0x000 to accept ANY Standard ID */
+    /* 4. Apply the "Allow Everything" Mask */
+    /* MASK 0x000 means "Don't compare any bits" -> Accept ALL IDs */
     FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x000, 0, 0));
 }
 
@@ -138,6 +157,7 @@ int main(void)
 
     while (1)
     {
+
         /* Check MB Status Flags */
         if (FLEXCAN_GetMbStatusFlags(EXAMPLE_CAN, (1ULL << RX_MESSAGE_BUFFER_NUM)))
         {
@@ -148,7 +168,7 @@ int main(void)
             if (status == kStatus_Success)
             {
                 /* UPDATED: Print ID and ALL Data Bytes */
-                PRINTF("RX ID: 0x%X | DLC: %d | Data: ",
+                LOG_INFO("RX ID: 0x%X | DLC: %d | Data: ",
                        rxFrame.id >> CAN_ID_STD_SHIFT,
                        rxFrame.length);
 
@@ -158,16 +178,9 @@ int main(void)
                    Here we print based on the raw DLC code assuming standard <=8 for simplicity
                    or use the dataWord array. */
 
-                uint8_t *dataBytes = (uint8_t *)&rxFrame.dataWord[0];
-                /* Assuming standard frame <= 8 bytes for simple print loop.
-                   Use specific DLC lookup for FD frames > 8 bytes. */
-                uint32_t byteCount = (rxFrame.length > 8) ? 8 : rxFrame.length;
+				LOG_INFO("0x%02X ", rxFrame.dataWord[0]);
 
-                for (uint32_t i = 0; i < byteCount; i++)
-                {
-                    PRINTF("0x%02X ", dataBytes[i]);
-                }
-                PRINTF("\r\n");
+                LOG_INFO("\r\n");
 
             }
             else
