@@ -20,6 +20,11 @@ flexcan_fd_frame_t txFrame;
 flexcan_mb_transfer_t txXfer;
 volatile bool txComplete = false;
 
+#define MASTER_POTENTIOMETER 1
+#define MASTER_DHT 2
+#define SLAVE_SERVO 0x322
+#define SLAVE_LED 0x321
+
 /*******************************************************************************
  * Prototypes
  ******************************************************************************/
@@ -167,10 +172,20 @@ int main(void)
 
             if (status == kStatus_Success)
             {
+            	// Collecting Data
+            	uint32_t Destination_ID = rxFrame.id >> CAN_ID_STD_SHIFT;
+            	uint32_t Data_Lenght = rxFrame.length;
+            	uint8_t Data_Received = rxFrame.dataWord[0] >> 24;
+            	uint8_t Source_ID = rxFrame.dataWord[0] >> 16;
+
+            	LOG_INFO("Desitnation ID: 0x%02X | DLC: 0x%02X | Source ID: 0x%02X | Data: 0x%02X", Destination_ID, Data_Lenght, Source_ID, Data_Received);
+                LOG_INFO("\r\n");
+
                 /* UPDATED: Print ID and ALL Data Bytes */
-                LOG_INFO("RX ID: 0x%X | DLC: %d | Data: ",
-                       rxFrame.id >> CAN_ID_STD_SHIFT,
-                       rxFrame.length);
+//                LOG_INFO("RX ID: 0x%X | DLC: %d | Data: ",
+//                       rxFrame.id >> CAN_ID_STD_SHIFT,
+//                       rxFrame.length);
+
 
                 /* Note: In FlexCAN FD, frame.length is the DLC code.
                    For standard CAN 0-8, it maps directly to bytes.
@@ -178,9 +193,25 @@ int main(void)
                    Here we print based on the raw DLC code assuming standard <=8 for simplicity
                    or use the dataWord array. */
 
-				LOG_INFO("0x%02X ", rxFrame.dataWord[0]);
-
+				/*LOG_INFO("0x%02X ", rxFrame.dataWord[0]);*/
+                if(Destination_ID == SLAVE_SERVO){
+                	if(Source_ID == MASTER_DHT){
+                		LOG_INFO("\tServo Motor received %d %% humidity from DHT22 sensor", Data_Received);
+                	}
+                	else if (Source_ID == MASTER_POTENTIOMETER){
+                		LOG_INFO("\tServo Motor received %d %% from Potentiometer", Data_Received);
+                	}
+                }
+                else if(Destination_ID == SLAVE_LED){
+                	if(Source_ID == MASTER_DHT){
+                		LOG_INFO("\tLED received %d C from DHT22 sensor", Data_Received);
+                	}
+                	else if (Source_ID == MASTER_POTENTIOMETER){
+                		LOG_INFO("\tLED received %d %% from Potentiometer", Data_Received);
+                	}
+                }
                 LOG_INFO("\r\n");
+
 
             }
             else

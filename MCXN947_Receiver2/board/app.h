@@ -19,7 +19,7 @@
 
 /* Receiver Configuration */
 #define RX_MESSAGE_BUFFER_NUM         (9U)  /* Use MB9 for reception */
-#define RX_MSG_ID                     0x321UL /* Listening for this ID */
+#define RX_MSG_ID                     0x322 /* Listening for this ID */
 #define BYTES_IN_MB                   kFLEXCAN_8BperMB
 #define DLC                           (1U)
 

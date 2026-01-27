@@ -27,7 +27,23 @@ void BOARD_InitHardware(void)
     CLOCK_EnableClock(kCLOCK_Gpio0); /* For Switch */
     CLOCK_EnableClock(kCLOCK_Gpio3); /* For TJA1152 STB */
 
+    /* Use FRO HF clock for CTIMER4 */
+    CLOCK_SetClkDiv(kCLOCK_DivCtimer4Clk, 1u);
+    CLOCK_AttachClk(kFRO_HF_to_CTIMER4);
+
+    /* attach FRO HF to SCT */
+	CLOCK_SetClkDiv(kCLOCK_DivSctClk, 1u);
+	CLOCK_AttachClk(kFRO_HF_to_SCT);
+
+/* Use FRO HF clock for CTIMER4 */
+CLOCK_SetClkDiv(kCLOCK_DivCtimer4Clk, 1u);
+CLOCK_AttachClk(kFRO_HF_to_CTIMER4);
+
+
     BOARD_InitPins();
     BOARD_BootClockPLL100M();
     BOARD_InitDebugConsole();
+    SYSCON->PWM1SUBCTL |=
+        (SYSCON_PWM1SUBCTL_CLK0_EN_MASK | SYSCON_PWM1SUBCTL_CLK1_EN_MASK | SYSCON_PWM1SUBCTL_CLK2_EN_MASK);
+
 }
