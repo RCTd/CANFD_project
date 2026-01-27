@@ -23,9 +23,20 @@
 #define BYTES_IN_MB                   kFLEXCAN_8BperMB
 #define DLC                           (1U)
 
+#define MASTER_DHT 2
+#define MASTER_POT 1
+
 /* --- LED Definitions (Red LED) --- */
-#define BOARD_LED_GPIO                BOARD_LED_RED_GPIO
-#define BOARD_LED_GPIO_PIN            BOARD_LED_RED_GPIO_PIN
+/* --- On-board RGB LED Definitions --- */
+#define BOARD_LED_RED_GPIO      GPIO0
+#define BOARD_LED_RED_PIN       10U
+
+#define BOARD_LED_GREEN_GPIO    GPIO0
+#define BOARD_LED_GREEN_PIN     27U
+
+#define BOARD_LED_BLUE_GPIO     GPIO1
+#define BOARD_LED_BLUE_PIN      2U
+
 /* IDs for the messages */
 #define TX_MSG_ID_BUTTON3             0x123UL
 #define TX_MSG_ID_BUTTON2             0x124UL

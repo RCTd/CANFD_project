@@ -66,6 +66,13 @@ void BOARD_InitPins(void)
 		kPORT_UnlockRegister
 	};
 	PORT_SetPinConfig(PORT0, 10U, &led_config);
+	/* RGB LED - GREEN (P0_27) */
+//	PORT_SetPinMux(PORT0, 27U, kPORT_MuxAlt0);
+	PORT_SetPinConfig(PORT0, 27U, &led_config);
+
+	/* RGB LED - BLUE (P1_2) */
+//	PORT_SetPinMux(PORT1, 2U, kPORT_MuxAlt0);
+	PORT_SetPinConfig(PORT1, 2U, &led_config);
 
 	const port_pin_config_t out_config = {
 		kPORT_PullDisable, kPORT_LowPullResistor, kPORT_FastSlewRate,

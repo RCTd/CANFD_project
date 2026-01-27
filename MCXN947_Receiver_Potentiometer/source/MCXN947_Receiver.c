@@ -24,7 +24,6 @@ volatile bool txComplete = false;
  * Prototypes
  ******************************************************************************/
 static void FLEXCAN_PHY_Config_Safe(void);
-static void SetNextTrafficLight(traffic_state_t *currentState);
 static void UpdatePotentiometerState(uint8_t percentage, pot_state_t *currentPotState);
 
 /*******************************************************************************
@@ -103,7 +102,10 @@ static void Init_Peripherals(void){
 	BOARD_InitHardware();
 	LOG_INFO("--- No-Hang CAN FD Receiver ---\r\n");
 
-	GPIO_PinInit(BOARD_LED_GPIO, BOARD_LED_GPIO_PIN, &led_config);
+	/* Initialize On-board RGB Pins */
+	GPIO_PinInit(BOARD_LED_RED_GPIO, BOARD_LED_RED_PIN, &led_config);
+	GPIO_PinInit(BOARD_LED_GREEN_GPIO, BOARD_LED_GREEN_PIN, &led_config);
+	GPIO_PinInit(BOARD_LED_BLUE_GPIO, BOARD_LED_BLUE_PIN, &led_config);
 
 	FLEXCAN_GetDefaultConfig(&flexcanConfig);
 //    flexcanConfig.bitRate = 500000U;
@@ -138,37 +140,6 @@ static void Init_Peripherals(void){
 	FLEXCAN_SetRxIndividualMask(EXAMPLE_CAN, RX_MESSAGE_BUFFER_NUM, FLEXCAN_RX_MB_STD_MASK(0x7FF, 0, 0));
 }
 
-/* Function now handles incrementing the state AND setting GPIOs */
-static void SetNextTrafficLight(traffic_state_t *currentState)
-{
-    /* 1. Increment the value pointed to by currentState */
-    *currentState = (traffic_state_t)((*currentState + 1) % 4);
-
-    /* 2. Turn off all lights first */
-    GPIO_PinWrite(RED_PORT, RED_PIN, 0U);
-    GPIO_PinWrite(YEL_PORT, YEL_PIN, 0U);
-    GPIO_PinWrite(GRN_PORT, GRN_PIN, 0U);
-
-    /* 3. Check the new state value */
-    switch(*currentState) {
-        case STATE_RED:
-            GPIO_PinWrite(RED_PORT, RED_PIN, 1U);
-            PRINTF("ROSU\r\n");
-            break;
-        case STATE_YEL:
-            GPIO_PinWrite(YEL_PORT, YEL_PIN, 1U);
-            PRINTF("GALBEN\r\n");
-            break;
-        case STATE_GRN:
-            GPIO_PinWrite(GRN_PORT, GRN_PIN, 1U);
-            PRINTF("VERDE\r\n");
-            break;
-        case STATE_OFF:
-            PRINTF("OPRIT\r\n");
-            break;
-    }
-}
-
 static void UpdatePotentiometerState(uint8_t percentage, pot_state_t *currentPotState)
 {
     /* 1. Determine the State based on input */
@@ -185,7 +156,7 @@ static void UpdatePotentiometerState(uint8_t percentage, pot_state_t *currentPot
     {
         *currentPotState = POT_STATE_LOW;
     }
-    else if (percentage > 34 && percentage <= 66)
+    else if (percentage > 33 && percentage <= 66)
     {
         *currentPotState = POT_STATE_NORMAL;
     }
@@ -231,9 +202,67 @@ static void UpdatePotentiometerState(uint8_t percentage, pot_state_t *currentPot
 }
 
 
+static void UpdateTempState(uint8_t temperature)
+{
+    /* 1. Determine the State based on input */
+	pot_state_t currentTmpState = POT_STATE_LOW;
+	GPIO_PinWrite(BOARD_LED_RED_GPIO, BOARD_LED_RED_PIN, 1U);
+	GPIO_PinWrite(BOARD_LED_GREEN_GPIO, BOARD_LED_GREEN_PIN, 1U);
+	GPIO_PinWrite(BOARD_LED_BLUE_GPIO, BOARD_LED_BLUE_PIN, 1U);
+
+    if (temperature <= 10)
+	{
+		currentTmpState = POT_STATE_ZERO;
+	}
+    else if (temperature > 10 && temperature <= 33)
+    {
+        currentTmpState = POT_STATE_LOW;
+    }
+    else if (temperature > 33 && temperature <= 37)
+    {
+        currentTmpState = POT_STATE_NORMAL;
+    }
+    else
+    {
+        currentTmpState = POT_STATE_CRITICAL;
+    }
+
+    PRINTF("   [Temperature] Value: %d%% -> ", temperature);
+
+    /* 2. Execute Action based on State */
+    switch (currentTmpState)
+    {
+    	case POT_STATE_ZERO:
+            PRINTF("State: ZERO \r\n");
+            GPIO_PinWrite(BOARD_LED_RED_GPIO, BOARD_LED_RED_PIN, 1U);
+            GPIO_PinWrite(BOARD_LED_GREEN_GPIO, BOARD_LED_GREEN_PIN, 1U);
+            GPIO_PinWrite(BOARD_LED_BLUE_GPIO, BOARD_LED_BLUE_PIN, 1U);
+			break;
+
+        case POT_STATE_LOW:
+            PRINTF("State: LOW \r\n");
+            GPIO_PinWrite(BOARD_LED_BLUE_GPIO, BOARD_LED_BLUE_PIN, 0U);
+            break;
+
+        case POT_STATE_NORMAL:
+            PRINTF("State: NORMAL\r\n");
+            GPIO_PinWrite(BOARD_LED_GREEN_GPIO, BOARD_LED_GREEN_PIN, 0U);
+            break;
+
+        case POT_STATE_CRITICAL:
+            PRINTF("State: CRITICAL \r\n");
+            GPIO_PinWrite(BOARD_LED_RED_GPIO, BOARD_LED_RED_PIN, 0U);
+            break;
+
+        default:
+            PRINTF("State: Unknown\r\n");
+            break;
+    }
+}
+
+
 int main(void)
 {
-	traffic_state_t trafficState = STATE_OFF;
 	pot_state_t potState = POT_STATE_LOW;
 
 	Init_Peripherals();
@@ -257,11 +286,19 @@ int main(void)
                 LOG_INFO("RX ID: 0x%X [Data: 0x%02X]\r\n",
                          rxFrame.id >> CAN_ID_STD_SHIFT,
                          rxFrame.dataWord[0]);
+                uint8_t source_id = rxFrame.dataWord[0] >> 16;
+                switch(source_id){
 
-                GPIO_PortToggle(BOARD_LED_GPIO, 1U << BOARD_LED_GPIO_PIN);
-
-                //SetNextTrafficLight(&trafficState);
-				UpdatePotentiometerState(extractedByte, &potState);
+                case MASTER_DHT:
+                	UpdateTempState(extractedByte);
+                	break;
+                case MASTER_POT:
+					UpdatePotentiometerState(extractedByte, &potState);
+                	break;
+                default:
+                	LOG_INFO("Source ID unknown\r\n");
+                	break;
+                }
             }
         }
     }
