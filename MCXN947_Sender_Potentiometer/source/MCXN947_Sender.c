@@ -507,6 +507,7 @@ int main(void)
             }
             /* Push data as integers to CAN FIFO */
             FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)potPercentage);
+            FIFO_Push(0x322, (uint8_t)potPercentage);
         }
 
         /***********************************************************************
