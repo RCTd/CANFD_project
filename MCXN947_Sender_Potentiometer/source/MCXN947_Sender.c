@@ -385,7 +385,7 @@ static void Init_SCTimer_2s(void)
     SCTIMER_Init(SCT0, &sctimerInfo);
 
     /* Calculate match value for 2000ms */
-    matchValue = MSEC_TO_COUNT(1000U, SCTIMER_CLK_FREQ);
+    matchValue = MSEC_TO_COUNT(30U, SCTIMER_CLK_FREQ);
 
     /* Schedule the event. This returns the event ID into eventCounter */
     SCTIMER_CreateAndScheduleEvent(SCT0, kSCTIMER_MatchEventOnly, matchValue, 0, kSCTIMER_Counter_U, &eventCounter);
