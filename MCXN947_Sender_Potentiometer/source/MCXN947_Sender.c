@@ -58,8 +58,9 @@ volatile can_msg_t fifo_buffer[FIFO_SIZE];
 volatile uint8_t fifo_head = 0;
 volatile uint8_t fifo_tail = 0;
 
+bool read_potentiometer(uint8_t *percentage);
 /* ADC variables */
-
+volatile uint8_t potPercentage = 0;
 lpadc_config_t mLpadcConfigStruct;
 lpadc_conv_trigger_config_t mLpadcTriggerConfigStruct;
 lpadc_conv_command_config_t mLpadcCommandConfigStruct;
@@ -143,16 +144,30 @@ void BOARD_SW3_IRQ_HANDLER(void)
 {
     uint32_t interruptFlags = GPIO_GpioGetInterruptFlags(GPIO0);
 
+
     if ((interruptFlags & (1U << BOARD_SW3_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW3_GPIO, 1U << BOARD_SW3_GPIO_PIN);
-        FIFO_Push(TX_MSG_ID_TIMER, 0x33);
+//        FIFO_Push(TX_MSG_ID_TIMER, 0x33);
+        if (read_potentiometer(&potPercentage)) {
+			LOG_INFO("Reading done \r\n");
+		} else {
+			LOG_INFO("Sensor Read Failed\r\n");
+		}
+		/* Push data as integers to CAN FIFO */
+		FIFO_Push(0x322, (uint8_t)potPercentage);
     }
 
     if ((interruptFlags & (1U << BOARD_SW2_GPIO_PIN)) != 0)
     {
         GPIO_GpioClearInterruptFlags(BOARD_SW2_GPIO, 1U << BOARD_SW2_GPIO_PIN);
-        FIFO_Push(TX_MSG_ID_TIMER, 0x22);
+        if (read_potentiometer(&potPercentage)) {
+			LOG_INFO("Reading done \r\n");
+		} else {
+			LOG_INFO("Sensor Read Failed\r\n");
+		}
+		/* Push data as integers to CAN FIFO */
+		FIFO_Push(TX_MSG_ID_TIMER, (uint8_t)potPercentage);
     }
     SDK_ISR_EXIT_BARRIER;
 }
@@ -484,8 +499,6 @@ int main(void)
         if (g_triggerSensorRead)
         {
             g_triggerSensorRead = false;
-
-            uint8_t potPercentage = 0;
 
             if (read_potentiometer(&potPercentage)) {
                 LOG_INFO("Reading done \r\n");
